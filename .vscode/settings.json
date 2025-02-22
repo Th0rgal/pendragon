@@ -1,0 +1,5 @@
+{
+  "idf.pythonInstallPath": "/Users/thomas/.espressif/python_env/idf5.4_py3.13_env/bin/python",
+  "idf.flashType": "UART",
+  "idf.port": "/dev/tty.wchusbserial595B0048221"
+}
