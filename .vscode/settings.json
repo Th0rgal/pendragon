@@ -3,5 +3,9 @@
     "esp_chip_info.h": "c"
   },
   "idf.flashType": "UART",
-  "idf.port": "/dev/cu.wchusbserial595B0048221"
+  "idf.port": "/dev/cu.wchusbserial54F40166311",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "idf.openOcdConfigs": ["board/esp32-wrover-kit-3.3v.cfg"] // "/dev/cu.wchusbserial595B0048221"
 }

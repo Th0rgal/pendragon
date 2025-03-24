@@ -1,117 +1,150 @@
 #include <stdio.h>
-#include "driver/i2c.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
-#define I2C_MASTER_SCL_IO 9       // SCL pin
-#define I2C_MASTER_SDA_IO 8       // SDA pin
-#define I2C_MASTER_NUM I2C_NUM_0  // I2C port number for master
-#define I2C_MASTER_FREQ_HZ 400000 // I2C clock frequency
+#include "sensor_monitor.h"
+#include "command_handler.h"
+#include "pid_controller.h"
+#include "motor_control.h"
 
-#define ICM20602_ADDRESS 0x69 // I2C address of the ICM-20602 (found in logs)
-#define WHO_AM_I_REG 0x75     // WHO_AM_I register address
-#define PWR_MGMT_1 0x6B       // Power Management 1 register
-#define ACCEL_XOUT_H 0x3B     // First register of accelerometer data
-#define GYRO_XOUT_H 0x43      // First register of gyroscope data
+// Add near the top of the file, after the includes
+#define ENABLE_MAIN_LOGGING 0 // Set to 0 to disable main task logging
 
-static const char *TAG = "ICM20602";
+static const char *TAG = "MAIN";
 
-// Initialize I2C
-void i2c_master_init()
+// Queues for inter-task communication
+QueueHandle_t sensor_data_queue;
+QueueHandle_t command_queue;
+
+// Task handles for monitoring
+TaskHandle_t sensor_task_handle;
+TaskHandle_t command_task_handle;
+TaskHandle_t pid_task_handle;
+
+// Debug task to monitor system status
+void debug_monitor_task(void *pvParameters)
 {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_MASTER_SDA_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_io_num = I2C_MASTER_SCL_IO,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-    };
-    i2c_param_config(I2C_MASTER_NUM, &conf);
-    i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
-}
+#if ENABLE_MAIN_LOGGING
+    ESP_LOGI(TAG, "Debug monitor task started");
+#endif
 
-// Write a byte to a register
-void i2c_write_byte(uint8_t reg_addr, uint8_t data)
-{
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (ICM20602_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, reg_addr, true);
-    i2c_master_write_byte(cmd, data, true);
-    i2c_master_stop(cmd);
-    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
-    i2c_cmd_link_delete(cmd);
-}
-
-// Read multiple bytes from consecutive registers
-void i2c_read_bytes(uint8_t reg_addr, uint8_t *data, size_t len)
-{
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (ICM20602_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, reg_addr, true);
-    i2c_master_start(cmd); // Repeated start
-    i2c_master_write_byte(cmd, (ICM20602_ADDRESS << 1) | I2C_MASTER_READ, true);
-
-    if (len > 1)
-    {
-        i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
-    }
-    i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_NACK);
-
-    i2c_master_stop(cmd);
-    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
-    i2c_cmd_link_delete(cmd);
-}
-
-// Initialize the ICM-20602
-void icm20602_init()
-{
-    // Reset the device
-    i2c_write_byte(PWR_MGMT_1, 0x80);     // Set bit 7 to reset
-    vTaskDelay(100 / portTICK_PERIOD_MS); // Wait for reset to complete
-
-    // Wake up the device
-    i2c_write_byte(PWR_MGMT_1, 0x00); // Clear sleep bit
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-}
-
-void app_main()
-{
-    // Initialize I2C
-    i2c_master_init();
-
-    // Initialize ICM-20602
-    icm20602_init();
-
-    // Main loop to read sensor data
     while (1)
     {
-        // Read accelerometer data (6 bytes: X, Y, Z with 2 bytes each)
-        uint8_t accel_data[6] = {0};
-        i2c_read_bytes(ACCEL_XOUT_H, accel_data, 6);
+        // Check if tasks are still running
+        eTaskState sensor_state = eTaskGetState(sensor_task_handle);
+        eTaskState command_state = eTaskGetState(command_task_handle);
+        eTaskState pid_state = eTaskGetState(pid_task_handle);
 
-        // Convert the data to 16-bit signed values
-        int16_t accel_x = (accel_data[0] << 8) | accel_data[1];
-        int16_t accel_y = (accel_data[2] << 8) | accel_data[3];
-        int16_t accel_z = (accel_data[4] << 8) | accel_data[5];
+#if ENABLE_MAIN_LOGGING
+        ESP_LOGI(TAG, "System running - Tasks status:");
+        ESP_LOGI(TAG, "  Sensor task: %s",
+                 (sensor_state == eReady || sensor_state == eRunning || sensor_state == eBlocked)
+                     ? "ACTIVE"
+                     : "INACTIVE");
+        ESP_LOGI(TAG, "  Command task: %s",
+                 (command_state == eReady || command_state == eRunning || command_state == eBlocked)
+                     ? "ACTIVE"
+                     : "INACTIVE");
+        ESP_LOGI(TAG, "  PID task: %s",
+                 (pid_state == eReady || pid_state == eRunning || pid_state == eBlocked)
+                     ? "ACTIVE"
+                     : "INACTIVE");
 
-        // Read gyroscope data (6 bytes: X, Y, Z with 2 bytes each)
-        uint8_t gyro_data[6] = {0};
-        i2c_read_bytes(GYRO_XOUT_H, gyro_data, 6);
+        // Print memory info
+        ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
+#endif
 
-        // Convert the data to 16-bit signed values
-        int16_t gyro_x = (gyro_data[0] << 8) | gyro_data[1];
-        int16_t gyro_y = (gyro_data[2] << 8) | gyro_data[3];
-        int16_t gyro_z = (gyro_data[4] << 8) | gyro_data[5];
+        vTaskDelay(3000 / portTICK_PERIOD_MS); // Print status every 3 seconds
+    }
+}
 
-        // Log the sensor data
-        ESP_LOGI(TAG, "Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
-                 accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+void app_main(void)
+{
+#if ENABLE_MAIN_LOGGING
+    ESP_LOGI(TAG, "Flight Controller Starting...");
+#endif
 
-        // Delay before next reading
+    // Initialize queues for inter-task communication
+    sensor_data_queue = xQueueCreate(5, sizeof(sensor_data_t));
+    command_queue = xQueueCreate(5, sizeof(flight_command_t));
+
+    if (!sensor_data_queue || !command_queue)
+    {
+        ESP_LOGE(TAG, "Failed to create queues");
+        return;
+    }
+
+#if ENABLE_MAIN_LOGGING
+    ESP_LOGI(TAG, "Queues created successfully");
+    ESP_LOGI(TAG, "Initializing sensors...");
+#endif
+    init_sensors();
+
+#if ENABLE_MAIN_LOGGING
+    ESP_LOGI(TAG, "Initializing motor control...");
+#endif
+    init_motor_control();
+
+#if ENABLE_MAIN_LOGGING
+    ESP_LOGI(TAG, "Creating tasks...");
+#endif
+
+    BaseType_t result = xTaskCreate(sensor_monitor_task, "sensor_monitor", 4096, NULL, 5, &sensor_task_handle);
+    if (result != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create sensor monitor task: %d", result);
+    }
+#if ENABLE_MAIN_LOGGING
+    else
+    {
+        ESP_LOGI(TAG, "Sensor monitor task created");
+    }
+#endif
+
+    result = xTaskCreate(command_handler_task, "command_handler", 4096, NULL, 4, &command_task_handle);
+    if (result != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create command handler task: %d", result);
+    }
+#if ENABLE_MAIN_LOGGING
+    else
+    {
+        ESP_LOGI(TAG, "Command handler task created");
+    }
+#endif
+
+    result = xTaskCreate(pid_controller_task, "pid_controller", 4096, NULL, 6, &pid_task_handle);
+    if (result != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create PID controller task: %d", result);
+    }
+#if ENABLE_MAIN_LOGGING
+    else
+    {
+        ESP_LOGI(TAG, "PID controller task created");
+    }
+#endif
+
+    // Create debug monitor task
+    result = xTaskCreate(debug_monitor_task, "debug_monitor", 4096, NULL, 1, NULL);
+    if (result != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create debug monitor task: %d", result);
+    }
+#if ENABLE_MAIN_LOGGING
+    else
+    {
+        ESP_LOGI(TAG, "Debug monitor task created");
+    }
+
+    ESP_LOGI(TAG, "All tasks started");
+#endif
+
+    // Keep app_main alive to prevent potential issues
+    while (1)
+    {
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }

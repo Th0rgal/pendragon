@@ -1,3 +1,6 @@
 idf_component_register(SRCS "main.c"
-                    PRIV_REQUIRES spi_flash driver
-                    INCLUDE_DIRS ".")
+                            "sensor_monitor.c"
+                            "command_handler.c"
+                            "pid_controller.c"
+                            "motor_control.c"
+                       INCLUDE_DIRS ".")
