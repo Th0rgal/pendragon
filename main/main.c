@@ -22,6 +22,7 @@ QueueHandle_t command_queue;
 TaskHandle_t sensor_task_handle;
 TaskHandle_t command_task_handle;
 TaskHandle_t pid_task_handle;
+TaskHandle_t esc_task_handle;
 
 // Debug task to monitor system status
 void debug_monitor_task(void *pvParameters)
@@ -36,6 +37,7 @@ void debug_monitor_task(void *pvParameters)
         eTaskState sensor_state = eTaskGetState(sensor_task_handle);
         eTaskState command_state = eTaskGetState(command_task_handle);
         eTaskState pid_state = eTaskGetState(pid_task_handle);
+        eTaskState esc_state = eTaskGetState(esc_task_handle);
 
 #if ENABLE_MAIN_LOGGING
         ESP_LOGI(TAG, "System running - Tasks status:");
@@ -49,6 +51,10 @@ void debug_monitor_task(void *pvParameters)
                      : "INACTIVE");
         ESP_LOGI(TAG, "  PID task: %s",
                  (pid_state == eReady || pid_state == eRunning || pid_state == eBlocked)
+                     ? "ACTIVE"
+                     : "INACTIVE");
+        ESP_LOGI(TAG, "  ESC task: %s",
+                 (esc_state == eReady || esc_state == eRunning || esc_state == eBlocked)
                      ? "ACTIVE"
                      : "INACTIVE");
 
@@ -85,7 +91,7 @@ void app_main(void)
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Initializing motor control...");
 #endif
-    init_motor_control();
+    init_motors();
 
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Creating tasks...");
@@ -96,36 +102,41 @@ void app_main(void)
     {
         ESP_LOGE(TAG, "Failed to create sensor monitor task: %d", result);
     }
-#if ENABLE_MAIN_LOGGING
     else
     {
         ESP_LOGI(TAG, "Sensor monitor task created");
     }
-#endif
 
     result = xTaskCreate(command_handler_task, "command_handler", 4096, NULL, 4, &command_task_handle);
     if (result != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create command handler task: %d", result);
     }
-#if ENABLE_MAIN_LOGGING
     else
     {
         ESP_LOGI(TAG, "Command handler task created");
     }
-#endif
 
     result = xTaskCreate(pid_controller_task, "pid_controller", 4096, NULL, 6, &pid_task_handle);
     if (result != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create PID controller task: %d", result);
     }
-#if ENABLE_MAIN_LOGGING
     else
     {
         ESP_LOGI(TAG, "PID controller task created");
     }
-#endif
+
+    // Create ESC control task
+    result = xTaskCreate(esc_control_task, "esc_control", 4096, NULL, 7, &esc_task_handle);
+    if (result != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create ESC control task: %d", result);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "ESC control task created");
+    }
 
     // Create debug monitor task
     result = xTaskCreate(debug_monitor_task, "debug_monitor", 4096, NULL, 1, NULL);

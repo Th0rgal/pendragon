@@ -36,16 +36,16 @@ static void calculate_motor_outputs(
 {
     // Basic quadcopter mixing algorithm (X configuration)
     // Motor order: 1=front-right, 2=rear-right, 3=rear-left, 4=front-left
-
+    
     // Scale throttle from 0-1 to 0-1000 for motor commands
     float base_throttle = throttle * 1000.0f;
-
+    
     // Apply simple mixing
-    float m1 = base_throttle - roll - pitch + yaw; // Front right
-    float m2 = base_throttle - roll + pitch - yaw; // Rear right
-    float m3 = base_throttle + roll + pitch + yaw; // Rear left
-    float m4 = base_throttle + roll - pitch - yaw; // Front left
-
+    float m1 = base_throttle - roll - pitch + yaw;  // Front right
+    float m2 = base_throttle - roll + pitch - yaw;  // Rear right
+    float m3 = base_throttle + roll + pitch + yaw;  // Rear left
+    float m4 = base_throttle + roll - pitch - yaw;  // Front left
+    
     // Constrain values and convert to uint16_t
     motor_cmd->motor1 = (uint16_t)(m1 < 0 ? 0 : (m1 > 1000 ? 1000 : m1));
     motor_cmd->motor2 = (uint16_t)(m2 < 0 ? 0 : (m2 > 1000 ? 1000 : m2));
@@ -58,21 +58,25 @@ void pid_controller_task(void *pvParameters)
     sensor_data_t sensor_data;
     flight_command_t command = {0};
     motor_command_t motor_command = {0};
-    uint32_t last_log_time = 0;
     uint32_t current_time = 0;
     bool armed = false;
+    uint32_t test_counter = 0;
 
     ESP_LOGI(TAG, "PID controller task started");
+
+    // Wait a bit before starting motor tests to let the ESC initialize
+    vTaskDelay(15000 / portTICK_PERIOD_MS);  // Wait 15 seconds
+    ESP_LOGI(TAG, "Starting motor test sequence from PID controller");
 
     while (1)
     {
         current_time += 10; // 10ms per iteration
-
+        test_counter++;
+        
         // Get latest sensor data
         if (xQueueReceive(sensor_data_queue, &sensor_data, 0) == pdTRUE)
         {
             // Process sensor data (will be used in PID implementation)
-            // For now, just acknowledge receipt
             ESP_LOGD(TAG, "Received sensor data");
         }
 
@@ -80,51 +84,54 @@ void pid_controller_task(void *pvParameters)
         if (xQueueReceive(command_queue, &command, 0) == pdTRUE)
         {
             // Check if arm status changed
-            if (command.arm_status != armed)
-            {
+            if (command.arm_status != armed) {
                 armed = command.arm_status;
-#if ENABLE_PID_LOGGING
                 ESP_LOGI(TAG, "Arm status changed to: %s", armed ? "ARMED" : "DISARMED");
-#endif
             }
         }
 
-        // Calculate motor outputs based on commands
-        if (armed)
-        {
-            // In a real implementation, this would use PID control
-            // For now, just do direct mixing of the commands
-            calculate_motor_outputs(
-                command.throttle,
-                command.roll * 0.3f,  // Scale for less aggressive response
-                command.pitch * 0.3f, // Scale for less aggressive response
-                command.yaw * 0.3f,   // Scale for less aggressive response
-                &motor_command);
+        // Test sequence using known working values (200 maps to 1200 on ESC)
+        // We use a simple state machine approach with longer periods at each level
+        
+        // Change state every 10 seconds (1000 * 10ms iterations)
+        uint32_t state = (test_counter / 1000) % 5;
+        uint16_t test_throttle = 0;
+        
+        switch(state) {
+            case 0:  // Minimum/off state
+                test_throttle = 0;
+                break;
+            case 1:  // Start at known working threshold
+                test_throttle = 200;  // Maps to 1200 - confirmed working value
+                break;
+            case 2:  // Medium-low throttle 
+                test_throttle = 220;  // Maps to 1220
+                break;
+            case 3:  // Medium throttle
+                test_throttle = 250;  // Maps to 1250
+                break;
+            case 4:  // Back to lower throttle
+                test_throttle = 200;  // Maps to 1200 - confirmed working value
+                break;
         }
-        else
-        {
-            // When disarmed, all motors off
-            motor_command.motor1 = 0;
-            motor_command.motor2 = 0;
-            motor_command.motor3 = 0;
-            motor_command.motor4 = 0;
+        
+        // Log at the beginning of each state
+        if (test_counter % 1000 == 0) {
+            ESP_LOGI(TAG, "PID TEST STATE %lu: Setting throttle to %u", 
+                     state, test_throttle);
         }
+        
+        // Set all motors to the test throttle
+        // For a single ESC setup, only motor1 actually matters
+        motor_command.motor1 = test_throttle;
+        motor_command.motor2 = test_throttle;
+        motor_command.motor3 = test_throttle;
+        motor_command.motor4 = test_throttle;
 
         // Apply motor commands directly
-        apply_motor_command(&motor_command);
-
-        // Log motor outputs periodically
-#if ENABLE_PID_LOGGING
-        if (current_time - last_log_time >= 1000)
-        { // Log every second
-            ESP_LOGI(TAG, "Motors: %d, %d, %d, %d",
-                     motor_command.motor1, motor_command.motor2,
-                     motor_command.motor3, motor_command.motor4);
-            last_log_time = current_time;
-        }
-#endif
-
-        // PID control frequency
-        vTaskDelay(10 / portTICK_PERIOD_MS); // 100Hz
+        set_all_motors(&motor_command);
+        
+        // PID control frequency - 100Hz
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
