@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
+#include "freertos/semphr.h"
 #include <math.h>
 
 #define I2C_MASTER_SCL_IO 9       // SCL pin
@@ -23,7 +24,6 @@ static const char *TAG = "SENSOR_MONITOR";
 #define ENABLE_SENSOR_LOGGING 0  // Set to 1 to enable sensor logging
 
 // Global variables
-static uint32_t time_ms = 0;
 static TimerHandle_t sensor_timer = NULL;
 static sensor_data_t sensor_data = {0};
 
@@ -109,29 +109,49 @@ static void read_sensor_data(sensor_data_t *data)
     }
 }
 
-// Timer callback function - called every 20ms (50Hz)
+// Timer callback function - called every 100ms (10Hz)
 static void sensor_timer_callback(TimerHandle_t xTimer)
 {
+    static uint32_t backoff_count = 0;
+    static TickType_t last_success_time = 0;
+
     // Read sensor data
     read_sensor_data(&sensor_data);
-    
+
     // Log the sensor data (less frequently to avoid log spam)
 #if ENABLE_SENSOR_LOGGING
     static uint32_t log_counter = 0;
     log_counter++;
-    
-    if (log_counter % 25 == 0) // Log every 500ms (25 * 20ms)
-    { 
+
+    if (log_counter % 25 == 0) // Log every 2.5 seconds (25 * 100ms)
+    {
         ESP_LOGI(TAG, "Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
                  sensor_data.accel_x, sensor_data.accel_y, sensor_data.accel_z,
                  sensor_data.gyro_x, sensor_data.gyro_y, sensor_data.gyro_z);
     }
 #endif
 
-    // Send data to PID controller task
-    if (xQueueSend(sensor_data_queue, &sensor_data, 0) != pdTRUE)
+    // Send data to queue with a timeout to prevent blocking
+    // Use a very short timeout (1ms) to avoid blocking the timer callback
+    if (xQueueSend(sensor_data_queue, &sensor_data, pdMS_TO_TICKS(1)) == pdTRUE)
     {
-        ESP_LOGW(TAG, "Failed to send sensor data to queue");
+        // Success - reset backoff
+        backoff_count = 0;
+        last_success_time = xTaskGetTickCount();
+    }
+    else
+    {
+        // Skip sensor data if queue is full - don't even log warnings unless it's persisting
+        backoff_count++;
+
+        // Only log if we haven't successfully sent data in a while (3 seconds)
+        if (backoff_count > 30 && (xTaskGetTickCount() - last_success_time) > pdMS_TO_TICKS(3000))
+        {
+            ESP_LOGW(TAG, "Queue full for 3 seconds - consider reducing sensor frequency");
+            // Reset after logging to avoid spam
+            last_success_time = xTaskGetTickCount();
+            backoff_count = 0;
+        }
     }
 }
 
@@ -153,32 +173,55 @@ void sensor_monitor_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Sensor monitor task started");
 
-    // Create a timer that triggers every 20ms (50Hz)
+    // Get the synchronization semaphore
+    SemaphoreHandle_t startup_sync = (SemaphoreHandle_t)pvParameters;
+
+    // Wait for the synchronization signal from main
+    if (startup_sync != NULL)
+    {
+        ESP_LOGI(TAG, "Waiting for startup synchronization...");
+        if (xSemaphoreTake(startup_sync, pdMS_TO_TICKS(5000)) != pdTRUE)
+        {
+            ESP_LOGW(TAG, "Timeout waiting for startup sync - proceeding anyway");
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Received startup synchronization");
+        }
+        // Return the semaphore
+        xSemaphoreGive(startup_sync);
+    }
+
+    // Create a timer that triggers every 100ms (10Hz) instead of 50ms (20Hz)
+    // This further reduces the frequency of timer callbacks to prevent queue overflow
     sensor_timer = xTimerCreate(
-        "SensorTimer",             // Timer name
-        pdMS_TO_TICKS(20),         // Timer period in ticks (20ms)
-        pdTRUE,                    // Auto-reload timer
-        (void *)0,                 // Timer ID
-        sensor_timer_callback      // Callback function
+        "SensorTimer",        // Timer name
+        pdMS_TO_TICKS(100),   // Timer period in ticks (100ms)
+        pdTRUE,               // Auto-reload timer
+        (void *)0,            // Timer ID
+        sensor_timer_callback // Callback function
     );
-    
-    if (sensor_timer == NULL) {
+
+    if (sensor_timer == NULL)
+    {
         ESP_LOGE(TAG, "Failed to create sensor timer");
         vTaskDelete(NULL);
         return;
     }
-    
-    // Start the timer
-    if (xTimerStart(sensor_timer, 0) != pdPASS) {
+
+    // Start the timer with a higher priority
+    if (xTimerStart(sensor_timer, 0) != pdPASS)
+    {
         ESP_LOGE(TAG, "Failed to start sensor timer");
         vTaskDelete(NULL);
         return;
     }
-    
+
     ESP_LOGI(TAG, "Sensor timer started successfully");
 
     // Task remains alive to keep the timer running
-    while (1) {
+    while (1)
+    {
         vTaskDelay(1000 / portTICK_PERIOD_MS); // Just keep the task alive
     }
 }
