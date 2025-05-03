@@ -9,13 +9,19 @@
 #define I2C_MASTER_SCL_IO 9       // SCL pin
 #define I2C_MASTER_SDA_IO 8       // SDA pin
 #define I2C_MASTER_NUM I2C_NUM_0  // I2C port number for master
-#define I2C_MASTER_FREQ_HZ 400000 // I2C clock frequency
+#define I2C_MASTER_FREQ_HZ 100000 // I2C clock frequency - REDUCED FROM 400000
 
-#define ICM20602_ADDRESS 0x69 // I2C address of the ICM-20602
-#define WHO_AM_I_REG 0x75     // WHO_AM_I register address
-#define PWR_MGMT_1 0x6B       // Power Management 1 register
-#define ACCEL_XOUT_H 0x3B     // First register of accelerometer data
-#define GYRO_XOUT_H 0x43      // First register of gyroscope data
+// Try both common addresses for the ICM-20602
+#define ICM20602_ADDRESS_1 0x68 // AD0 pin low/disconnected (default)
+#define ICM20602_ADDRESS_2 0x69 // AD0 pin high
+
+// Current active address - will try both
+static uint8_t icm20602_address = ICM20602_ADDRESS_1;
+
+#define WHO_AM_I_REG 0x75 // WHO_AM_I register address
+#define PWR_MGMT_1 0x6B   // Power Management 1 register
+#define ACCEL_XOUT_H 0x3B // First register of accelerometer data
+#define GYRO_XOUT_H 0x43  // First register of gyroscope data
 
 static const char *TAG = "SENSOR_MONITOR";
 
@@ -31,10 +37,14 @@ static sensor_data_t sensor_data = {0};
 static void sensor_timer_callback(TimerHandle_t xTimer);
 static void read_sensor_data(sensor_data_t *data);
 static esp_err_t i2c_write_byte(uint8_t reg_addr, uint8_t data);
+static esp_err_t i2c_scan(void);
 
 // I2C initialization
 static esp_err_t i2c_master_init(void)
 {
+    ESP_LOGI(TAG, "Initializing I2C master on SDA=GPIO%d, SCL=GPIO%d at %d Hz",
+             I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO, I2C_MASTER_FREQ_HZ);
+
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = I2C_MASTER_SDA_IO,
@@ -52,10 +62,10 @@ static esp_err_t i2c_read_bytes(uint8_t reg_addr, uint8_t *data, size_t len)
 {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (ICM20602_ADDRESS << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, (icm20602_address << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, reg_addr, true);
     i2c_master_start(cmd); // Repeated start
-    i2c_master_write_byte(cmd, (ICM20602_ADDRESS << 1) | I2C_MASTER_READ, true);
+    i2c_master_write_byte(cmd, (icm20602_address << 1) | I2C_MASTER_READ, true);
 
     if (len > 1)
     {
@@ -69,20 +79,111 @@ static esp_err_t i2c_read_bytes(uint8_t reg_addr, uint8_t *data, size_t len)
     return ret;
 }
 
+// Scan the I2C bus for all connected devices
+static esp_err_t i2c_scan(void)
+{
+    ESP_LOGI(TAG, "Scanning I2C bus for devices...");
+    uint8_t devices_found = 0;
+
+    for (uint8_t i = 1; i < 128; i++) // Skip address 0 (general call address)
+    {
+        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (i << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_stop(cmd);
+        esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 50 / portTICK_PERIOD_MS);
+        i2c_cmd_link_delete(cmd);
+
+        if (ret == ESP_OK)
+        {
+            ESP_LOGI(TAG, "Device found at address 0x%02X", i);
+            devices_found++;
+
+            // If we found our expected sensor addresses, note it
+            if (i == ICM20602_ADDRESS_1 || i == ICM20602_ADDRESS_2)
+            {
+                ESP_LOGI(TAG, "  --> Potential ICM-20602 at this address!");
+            }
+        }
+    }
+
+    if (devices_found == 0)
+    {
+        ESP_LOGW(TAG, "No I2C devices found! Check your wiring.");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "I2C scan complete. Found %d device(s)", devices_found);
+    }
+
+    return (devices_found > 0) ? ESP_OK : ESP_FAIL;
+}
+
 // Initialize the sensor
 void init_sensors(void)
 {
-    i2c_master_init();
+    esp_err_t ret = i2c_master_init();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "I2C initialization failed: %d", ret);
+        return;
+    }
 
-    // Reset the device
-    i2c_write_byte(PWR_MGMT_1, 0x80);     // Set bit 7 to reset
-    vTaskDelay(100 / portTICK_PERIOD_MS); // Wait for reset to complete
+    // First, scan for I2C devices
+    i2c_scan();
 
-    // Wake up the device
-    i2c_write_byte(PWR_MGMT_1, 0x00); // Clear sleep bit
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    // Try with first address
+    icm20602_address = ICM20602_ADDRESS_1;
+    ESP_LOGI(TAG, "Trying ICM-20602 at address 0x%02X", icm20602_address);
 
-    ESP_LOGI(TAG, "Sensors initialized");
+    // Check WHO_AM_I register to verify sensor presence
+    uint8_t who_am_i_val = 0;
+    esp_err_t err = i2c_read_bytes(WHO_AM_I_REG, &who_am_i_val, 1);
+
+    // If that failed, try the second address
+    if (err != ESP_OK)
+    {
+        ESP_LOGW(TAG, "No response at address 0x%02X, trying alternative address", icm20602_address);
+        icm20602_address = ICM20602_ADDRESS_2;
+        ESP_LOGI(TAG, "Trying ICM-20602 at address 0x%02X", icm20602_address);
+        err = i2c_read_bytes(WHO_AM_I_REG, &who_am_i_val, 1);
+    }
+
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to read WHO_AM_I register, error: %d", err);
+        ESP_LOGE(TAG, "Accelerometer might not be connected properly! Check wiring.");
+        ESP_LOGI(TAG, "Tips to fix I2C issues:");
+        ESP_LOGI(TAG, "1. Check physical connections (SDA to GPIO8, SCL to GPIO9)");
+        ESP_LOGI(TAG, "2. Make sure the sensor has stable 3.3V power");
+        ESP_LOGI(TAG, "3. Add 4.7kΩ external pull-up resistors on SDA and SCL lines");
+        ESP_LOGI(TAG, "4. Keep wires as short as possible to reduce noise");
+        ESP_LOGI(TAG, "5. Check if the sensor is damaged");
+    }
+    else
+    {
+        // ICM-20602 should return 0x12 for WHO_AM_I
+        if (who_am_i_val == 0x12)
+        {
+            ESP_LOGI(TAG, "ICM-20602 sensor detected successfully (WHO_AM_I = 0x%02x)", who_am_i_val);
+            ESP_LOGI(TAG, "Sensor responds at address 0x%02X", icm20602_address);
+
+            // Reset the device
+            i2c_write_byte(PWR_MGMT_1, 0x80);     // Set bit 7 to reset
+            vTaskDelay(100 / portTICK_PERIOD_MS); // Wait for reset to complete
+
+            // Wake up the device
+            i2c_write_byte(PWR_MGMT_1, 0x00); // Clear sleep bit
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Unexpected WHO_AM_I value: 0x%02x (expected 0x12)", who_am_i_val);
+            ESP_LOGW(TAG, "This might not be an ICM-20602 sensor or it might be malfunctioning");
+        }
+    }
+
+    ESP_LOGI(TAG, "Sensors initialization complete");
 }
 
 // Read sensor data (either real or simulated)
@@ -90,22 +191,66 @@ static void read_sensor_data(sensor_data_t *data)
 {
     // Read accelerometer data (6 bytes: X, Y, Z with 2 bytes each)
     uint8_t accel_data[6] = {0};
-    if (i2c_read_bytes(ACCEL_XOUT_H, accel_data, 6) == ESP_OK)
+    esp_err_t accel_result = i2c_read_bytes(ACCEL_XOUT_H, accel_data, 6);
+
+    if (accel_result == ESP_OK)
     {
         // Convert the data to 16-bit signed values
         data->accel_x = (accel_data[0] << 8) | accel_data[1];
         data->accel_y = (accel_data[2] << 8) | accel_data[3];
         data->accel_z = (accel_data[4] << 8) | accel_data[5];
+
+        // Debug log for first read only to avoid spam
+        static bool first_accel_read = true;
+        if (first_accel_read)
+        {
+            ESP_LOGI(TAG, "First accelerometer read success: [%02x,%02x,%02x,%02x,%02x,%02x]",
+                     accel_data[0], accel_data[1], accel_data[2],
+                     accel_data[3], accel_data[4], accel_data[5]);
+            first_accel_read = false;
+        }
+    }
+    else
+    {
+        static uint32_t accel_error_count = 0;
+        // Log only occasionally to avoid spam
+        if (accel_error_count % 100 == 0)
+        {
+            ESP_LOGW(TAG, "Accelerometer read failed, error: %d (count: %lu)", accel_result, accel_error_count);
+        }
+        accel_error_count++;
     }
 
     // Read gyroscope data (6 bytes: X, Y, Z with 2 bytes each)
     uint8_t gyro_data[6] = {0};
-    if (i2c_read_bytes(GYRO_XOUT_H, gyro_data, 6) == ESP_OK)
+    esp_err_t gyro_result = i2c_read_bytes(GYRO_XOUT_H, gyro_data, 6);
+
+    if (gyro_result == ESP_OK)
     {
         // Convert the data to 16-bit signed values
         data->gyro_x = (gyro_data[0] << 8) | gyro_data[1];
         data->gyro_y = (gyro_data[2] << 8) | gyro_data[3];
         data->gyro_z = (gyro_data[4] << 8) | gyro_data[5];
+
+        // Debug log for first read only to avoid spam
+        static bool first_gyro_read = true;
+        if (first_gyro_read)
+        {
+            ESP_LOGI(TAG, "First gyroscope read success: [%02x,%02x,%02x,%02x,%02x,%02x]",
+                     gyro_data[0], gyro_data[1], gyro_data[2],
+                     gyro_data[3], gyro_data[4], gyro_data[5]);
+            first_gyro_read = false;
+        }
+    }
+    else
+    {
+        static uint32_t gyro_error_count = 0;
+        // Log only occasionally to avoid spam
+        if (gyro_error_count % 100 == 0)
+        {
+            ESP_LOGW(TAG, "Gyroscope read failed, error: %d (count: %lu)", gyro_result, gyro_error_count);
+        }
+        gyro_error_count++;
     }
 }
 
@@ -114,6 +259,13 @@ static void sensor_timer_callback(TimerHandle_t xTimer)
 {
     static uint32_t backoff_count = 0;
     static TickType_t last_success_time = 0;
+    static bool first_callback = true;
+
+    if (first_callback)
+    {
+        ESP_LOGI(TAG, "Sensor timer callback started - will read sensors every 100ms");
+        first_callback = false;
+    }
 
     // Read sensor data
     read_sensor_data(&sensor_data);
@@ -160,7 +312,7 @@ static esp_err_t i2c_write_byte(uint8_t reg_addr, uint8_t data)
 {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (ICM20602_ADDRESS << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, (icm20602_address << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, reg_addr, true);
     i2c_master_write_byte(cmd, data, true);
     i2c_master_stop(cmd);

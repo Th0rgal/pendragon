@@ -9,6 +9,7 @@
 #include "sensor_monitor.h"
 #include "command_handler.h"
 #include "motor_control.h"
+#include "led_handler.h"
 
 // Add near the top of the file, after the includes
 #define ENABLE_MAIN_LOGGING 0 // Set to 0 to disable main task logging
@@ -24,6 +25,7 @@ TaskHandle_t sensor_task_handle;
 TaskHandle_t command_task_handle;
 TaskHandle_t esc_task_handle;
 TaskHandle_t debug_task_handle;
+TaskHandle_t led_task_handle;
 
 // Semaphore for task synchronization
 SemaphoreHandle_t startup_sync_semaphore;
@@ -72,6 +74,9 @@ void debug_monitor_task(void *pvParameters)
 
 void app_main(void)
 {
+    // Set log levels for different components
+    esp_log_level_set("SENSOR_MONITOR", ESP_LOG_INFO); // Ensure sensor logs are visible
+
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Flight Controller Starting...");
 #endif
@@ -130,6 +135,9 @@ void app_main(void)
 
     // Create debug monitor task
     xTaskCreate(debug_monitor_task, "debug_monitor", 4096, NULL, 1, &debug_task_handle);
+
+    // Create LED task
+    xTaskCreate(led_handler_task, "led_handler", 4096, NULL, 2, &led_task_handle);
 
     // Give the semaphore to signal that all tasks are created
     // and can begin their normal operation

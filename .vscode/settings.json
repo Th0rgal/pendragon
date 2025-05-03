@@ -1,9 +1,10 @@
 {
   "files.associations": {
-    "esp_chip_info.h": "c"
+    "esp_chip_info.h": "c",
+    "semphr.h": "c"
   },
   "idf.flashType": "UART",
-  "idf.port": "/dev/cu.wchusbserial595B0048221",
+  "idf.port": "/dev/tty.usbmodem101",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },

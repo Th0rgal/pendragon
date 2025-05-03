@@ -9,6 +9,9 @@ sdkconfig.old
 # ESP-IDF project-specific files
 dependencies.lock
 
+# ESP-IDF managed components
+managed_components
+
 ### C ###
 # Prerequisites
 *.d
