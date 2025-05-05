@@ -27,9 +27,24 @@ static const char *TAG = "MOTOR_CONTROL";
 #define PWM_TIMER LEDC_TIMER_0
 #define PWM_MODE LEDC_LOW_SPEED_MODE
 
-// Motor pin and channel (simplified for single motor)
-#define MOTOR_PIN 10 // Motor 1 - GPIO10
-#define MOTOR_CHANNEL LEDC_CHANNEL_0
+// Motor pin and channel configuration
+#define MOTOR_COUNT 4
+
+// Motor pins for each motor
+const uint8_t MOTOR_PINS[MOTOR_COUNT] = {
+    10, // MOTOR_TOP_RIGHT (GPIO 10)
+    9,  // MOTOR_BOTTOM_RIGHT (GPIO 9)
+    18, // MOTOR_TOP_LEFT (GPIO 18)
+    17  // MOTOR_BOTTOM_LEFT (GPIO 17)
+};
+
+// LEDC channels for each motor
+const uint8_t MOTOR_CHANNELS[MOTOR_COUNT] = {
+    LEDC_CHANNEL_0, // MOTOR_TOP_RIGHT
+    LEDC_CHANNEL_1, // MOTOR_BOTTOM_RIGHT
+    LEDC_CHANNEL_2, // MOTOR_TOP_LEFT
+    LEDC_CHANNEL_3  // MOTOR_BOTTOM_LEFT
+};
 
 // ESC signal calibration
 #define MIN_THROTTLE_PULSE_US 1000 // 1ms pulse (minimum throttle)
@@ -37,7 +52,8 @@ static const char *TAG = "MOTOR_CONTROL";
 #define WORKING_THROTTLE_VALUE 200 // Input throttle value where motor starts working (~1200 µs)
 
 // Global state
-static uint8_t motor_ramp_rate = 5; // Default ramp rate (units per 100ms)
+static uint8_t motor_ramp_rates[MOTOR_COUNT] = {5, 5, 5, 5};      // Default ramp rate (units per 100ms)
+static uint16_t current_motor_speeds[MOTOR_COUNT] = {0, 0, 0, 0}; // Current speed for each motor
 
 // Calculate PWM duty cycle from pulse width in microseconds
 static uint32_t pulse_us_to_duty(uint32_t pulse_us)
@@ -47,7 +63,7 @@ static uint32_t pulse_us_to_duty(uint32_t pulse_us)
 }
 
 // Set acceleration rate (1-50 units per 100ms)
-void set_motor_acceleration(uint8_t ramp_rate)
+void set_motor_acceleration(motor_id_t motor, uint8_t ramp_rate)
 {
     // Validate input range
     if (ramp_rate < 1)
@@ -59,18 +75,35 @@ void set_motor_acceleration(uint8_t ramp_rate)
         ramp_rate = 50; // Maximum allowed (rapid acceleration)
     }
 
-    motor_ramp_rate = ramp_rate;
-    ESP_LOGI(TAG, "Motor acceleration set to %d units per 100ms", motor_ramp_rate);
+    if (motor == MOTOR_ALL)
+    {
+        // Set ramp rate for all motors
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            motor_ramp_rates[i] = ramp_rate;
+        }
+        ESP_LOGI(TAG, "All motors acceleration set to %d units per 100ms", ramp_rate);
+    }
+    else if (motor < MOTOR_COUNT)
+    {
+        motor_ramp_rates[motor] = ramp_rate;
+        ESP_LOGI(TAG, "Motor %d acceleration set to %d units per 100ms", motor, ramp_rate);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Invalid motor ID: %d", motor);
+        return;
+    }
 
     // Calculate approximate time for a full 0-1000 ramp
-    float full_ramp_time = (1000.0f / motor_ramp_rate) * 0.1f; // in seconds
+    float full_ramp_time = (1000.0f / ramp_rate) * 0.1f; // in seconds
     ESP_LOGI(TAG, "Full throttle ramp will take approximately %.1f seconds", full_ramp_time);
 }
 
 // Initialize motor PWM channels
 void init_motors(void)
 {
-    ESP_LOGI(TAG, "Initializing motor control");
+    ESP_LOGI(TAG, "Initializing motor control for %d motors", MOTOR_COUNT);
 
     // Configure timer
     ledc_timer_config_t timer_conf = {
@@ -81,24 +114,27 @@ void init_motors(void)
         .clk_cfg = LEDC_AUTO_CLK};
     ledc_timer_config(&timer_conf);
 
-    // Configure single motor channel
-    ledc_channel_config_t channel_conf = {
-        .channel = MOTOR_CHANNEL,
-        .duty = pulse_us_to_duty(MIN_THROTTLE_PULSE_US), // Start at minimum throttle
-        .gpio_num = MOTOR_PIN,
-        .speed_mode = PWM_MODE,
-        .hpoint = 0,
-        .timer_sel = PWM_TIMER};
-    ledc_channel_config(&channel_conf);
+    // Configure all motor channels
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        ledc_channel_config_t channel_conf = {
+            .channel = MOTOR_CHANNELS[i],
+            .duty = pulse_us_to_duty(MIN_THROTTLE_PULSE_US), // Start at minimum throttle
+            .gpio_num = MOTOR_PINS[i],
+            .speed_mode = PWM_MODE,
+            .hpoint = 0,
+            .timer_sel = PWM_TIMER};
+        ledc_channel_config(&channel_conf);
 
-    ESP_LOGI(TAG, "Motor initialized on GPIO%d (channel %d)", MOTOR_PIN, MOTOR_CHANNEL);
+        ESP_LOGI(TAG, "Motor %d initialized on GPIO%d (channel %d)", i, MOTOR_PINS[i], MOTOR_CHANNELS[i]);
+    }
 
-    // Initialize default acceleration
-    set_motor_acceleration(motor_ramp_rate);
+    // Initialize default acceleration for all motors
+    set_motor_acceleration(MOTOR_ALL, 5);
 }
 
 // Set motor speed (0-1000 input range)
-void set_motor_speed(uint16_t speed)
+void set_motor_speed(motor_id_t motor, uint16_t speed)
 {
     // Limit speed to 0-1000 range
     if (speed > 1000)
@@ -117,52 +153,77 @@ void set_motor_speed(uint16_t speed)
         pulse_us = MIN_THROTTLE_PULSE_US + speed; // 1000 + speed → 1000-2000µs range
     }
 
-    // Convert to duty cycle and apply
+    // Convert to duty cycle
     uint32_t duty = pulse_us_to_duty(pulse_us);
-    ledc_set_duty(PWM_MODE, MOTOR_CHANNEL, duty);
-    ledc_update_duty(PWM_MODE, MOTOR_CHANNEL);
+
+    if (motor == MOTOR_ALL)
+    {
+        // Set all motors to the same speed
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            ledc_set_duty(PWM_MODE, MOTOR_CHANNELS[i], duty);
+            ledc_update_duty(PWM_MODE, MOTOR_CHANNELS[i]);
+            current_motor_speeds[i] = speed;
+        }
 
 #if ENABLE_LOGGING
-    // Only log significant changes to reduce log spam
-    static uint16_t last_speed = 0;
-    static uint32_t log_counter = 0;
-    static bool logged_zero = false;
-
-    // Only log in these specific cases
-    bool should_log = false;
-
-    if (speed == 0 && !logged_zero)
-    {
-        // First time we detect motor turned off
-        should_log = true;
-        logged_zero = true;
-    }
-    else if (speed > 0 && last_speed == 0)
-    {
-        // Motor turned on from off state
-        should_log = true;
-        logged_zero = false;
-    }
-    else if (abs((int)last_speed - (int)speed) > 100)
-    {
-        // Large speed change
-        should_log = true;
-    }
-    else if (log_counter % 500 == 0)
-    {
-        // Occasional status update
-        should_log = true;
-    }
-
-    log_counter++;
-
-    if (should_log)
-    {
-        ESP_LOGI(TAG, "Motor set to %d (pulse: %lu µs, duty: %lu)",
+        ESP_LOGI(TAG, "All motors set to %d (pulse: %lu µs, duty: %lu)",
                  speed, pulse_us, duty);
-        last_speed = speed;
-    }
 #endif
+    }
+    else if (motor < MOTOR_COUNT)
+    {
+        // Set specific motor
+        ledc_set_duty(PWM_MODE, MOTOR_CHANNELS[motor], duty);
+        ledc_update_duty(PWM_MODE, MOTOR_CHANNELS[motor]);
+        current_motor_speeds[motor] = speed;
+
+#if ENABLE_LOGGING
+        // Only log significant changes to reduce log spam
+        static uint16_t last_speeds[MOTOR_COUNT] = {0, 0, 0, 0};
+        static uint32_t log_counter = 0;
+        static bool logged_zero[MOTOR_COUNT] = {false, false, false, false};
+
+        // Only log in these specific cases
+        bool should_log = false;
+
+        if (speed == 0 && !logged_zero[motor])
+        {
+            // First time we detect motor turned off
+            should_log = true;
+            logged_zero[motor] = true;
+        }
+        else if (speed > 0 && last_speeds[motor] == 0)
+        {
+            // Motor turned on from off state
+            should_log = true;
+            logged_zero[motor] = false;
+        }
+        else if (abs((int)last_speeds[motor] - (int)speed) > 100)
+        {
+            // Large speed change
+            should_log = true;
+        }
+        else if (log_counter % 500 == 0)
+        {
+            // Occasional status update
+            should_log = true;
+        }
+
+        log_counter++;
+
+        if (should_log)
+        {
+            ESP_LOGI(TAG, "Motor %d set to %d (pulse: %lu µs, duty: %lu)",
+                     motor, speed, pulse_us, duty);
+            last_speeds[motor] = speed;
+        }
+#endif
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Invalid motor ID: %d", motor);
+    }
 }
 
 // Helper function to drain both queues - used during initialization and waiting periods
@@ -201,18 +262,16 @@ static void drain_queues(sensor_data_t *sensor_data, flight_command_t *command)
     }
 }
 
-// Task to control the ESC/motor for testing
+// Task to control the ESCs/motors for testing
 void esc_control_task(void *pvParameters)
 {
     // Variables declared at the top to avoid redeclaration issues
     sensor_data_t sensor_data;
     flight_command_t command;
-    int messages_processed;
     TickType_t drain_start_time, current_time, time_limit;
-    int current_step, num_steps, last_logged_step;
-    uint16_t current_throttle, target_throttle;
     uint32_t step_counter, log_counter;
-    bool motor_running, is_now_running;
+    bool motors_running[MOTOR_COUNT] = {false};
+    bool is_now_running;
     int drain_counter = 0;
     UBaseType_t sensor_queue_items, command_queue_items;
 
@@ -252,8 +311,8 @@ void esc_control_task(void *pvParameters)
     ESP_LOGI(TAG, "Starting ESC initialization sequence");
 
     // Step 1: Set all motors to min throttle
-    ESP_LOGI(TAG, "Step 1: Setting minimum throttle");
-    set_motor_speed(0); // Set to minimum
+    ESP_LOGI(TAG, "Step 1: Setting minimum throttle for all motors");
+    set_motor_speed(MOTOR_ALL, 0); // Set all to minimum
 
     // During the 3-second wait, periodically drain queues to prevent overflow
     for (int i = 0; i < 30; i++)
@@ -262,9 +321,9 @@ void esc_control_task(void *pvParameters)
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
-    // Step 2: Test with a working throttle value
-    ESP_LOGI(TAG, "Step 2: Testing with working throttle value (200)");
-    set_motor_speed(200); // 20% throttle - should start spinning
+    // Step 2: Test with a working throttle value for all motors
+    ESP_LOGI(TAG, "Step 2: Testing all motors with working throttle value (200)");
+    set_motor_speed(MOTOR_ALL, 200); // 20% throttle - should start spinning
 
     // During the 5-second wait, periodically drain queues to prevent overflow
     for (int i = 0; i < 50; i++)
@@ -294,18 +353,22 @@ void esc_control_task(void *pvParameters)
         {"Test 9: Back to off", 0, 30, 5}                   // 3 seconds - standard decel
     };
 
-    // Initialize variables
-    current_step = 0;
-    num_steps = sizeof(test_steps) / sizeof(test_steps[0]);
-    last_logged_step = -1;
-    current_throttle = 0;
-    target_throttle = test_steps[0].throttle_value;
+    // Initialize variables for each motor
+    int current_step = 0;
+    int num_steps = sizeof(test_steps) / sizeof(test_steps[0]);
+    int last_logged_step = -1;
+    uint16_t target_throttles[MOTOR_COUNT];
+
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        target_throttles[i] = test_steps[0].throttle_value;
+    }
+
     step_counter = 0;
     log_counter = 0;
-    motor_running = false;
 
-    // Start with standard acceleration
-    set_motor_acceleration(5);
+    // Start with standard acceleration for all motors
+    set_motor_acceleration(MOTOR_ALL, 5);
 
     // Main control loop
     while (1)
@@ -321,11 +384,16 @@ void esc_control_task(void *pvParameters)
         if (step_counter >= test_steps[current_step].duration_ds)
         {
             current_step = (current_step + 1) % num_steps;
-            target_throttle = test_steps[current_step].throttle_value;
             step_counter = 0;
 
-            // Set the acceleration rate for this step
-            set_motor_acceleration(test_steps[current_step].accel_rate);
+            // Set the target throttle for all motors
+            for (int i = 0; i < MOTOR_COUNT; i++)
+            {
+                target_throttles[i] = test_steps[current_step].throttle_value;
+            }
+
+            // Set the acceleration rate for this step for all motors
+            set_motor_acceleration(MOTOR_ALL, test_steps[current_step].accel_rate);
 
             // Log when changing steps
             ESP_LOGI(TAG, "Moving to %s (accel: %d)",
@@ -335,58 +403,63 @@ void esc_control_task(void *pvParameters)
             last_logged_step = current_step;
         }
 
-        // Smoothly approach the target throttle (change by at most the set ramp rate per iteration)
-        if (current_throttle < target_throttle)
+        // Smoothly approach the target throttle for each motor
+        for (int i = 0; i < MOTOR_COUNT; i++)
         {
-            current_throttle = MIN(current_throttle + motor_ramp_rate, target_throttle);
-        }
-        else if (current_throttle > target_throttle)
-        {
-            current_throttle = MAX(current_throttle - motor_ramp_rate, target_throttle);
-        }
+            if (current_motor_speeds[i] < target_throttles[i])
+            {
+                current_motor_speeds[i] = MIN(current_motor_speeds[i] + motor_ramp_rates[i], target_throttles[i]);
+            }
+            else if (current_motor_speeds[i] > target_throttles[i])
+            {
+                current_motor_speeds[i] = MAX(current_motor_speeds[i] - motor_ramp_rates[i], target_throttles[i]);
+            }
 
-        // Apply current throttle value
-        set_motor_speed(current_throttle);
+            // Apply current throttle value to each motor
+            set_motor_speed(i, current_motor_speeds[i]);
+
+            // Track motor state for potential state change logging
+            is_now_running = (current_motor_speeds[i] > 0);
+            if (is_now_running != motors_running[i])
+            {
+                ESP_LOGI(TAG, "Motor %d %s", i, is_now_running ? "ON" : "OFF");
+                motors_running[i] = is_now_running;
+            }
+        }
 
         // Log status only when step changes or every 50 iterations
         if (current_step != last_logged_step || log_counter % 50 == 0)
         {
-            // Add visual indicator for throttle percentage
-            char throttle_bar[21] = "[                    ]";
-            int bar_length = 20;
-            int fill_amount = (current_throttle * bar_length) / 1000;
-
-            for (int i = 0; i < fill_amount; i++)
-            {
-                throttle_bar[i + 1] = '=';
-            }
-
-            // Add a position marker
-            if (fill_amount < bar_length)
-            {
-                throttle_bar[fill_amount + 1] = '>';
-            }
-
-            ESP_LOGI(TAG, "%s (Speed: %d/1000, Target: %d, Accel: %d)",
+            ESP_LOGI(TAG, "%s (Acceleration: %d)",
                      test_steps[current_step].description,
-                     current_throttle,
-                     target_throttle,
                      test_steps[current_step].accel_rate);
 
-            // Show throttle percentage with visual indicator
-            ESP_LOGI(TAG, "Throttle: %d%% %s",
-                     current_throttle / 10,
-                     throttle_bar);
+            // Log throttle for each motor
+            for (int i = 0; i < MOTOR_COUNT; i++)
+            {
+                // Add visual indicator for throttle percentage
+                char throttle_bar[21] = "[                    ]";
+                int bar_length = 20;
+                int fill_amount = (current_motor_speeds[i] * bar_length) / 1000;
+
+                for (int j = 0; j < fill_amount; j++)
+                {
+                    throttle_bar[j + 1] = '=';
+                }
+
+                // Add a position marker
+                if (fill_amount < bar_length)
+                {
+                    throttle_bar[fill_amount + 1] = '>';
+                }
+
+                // Show throttle percentage with visual indicator for each motor
+                ESP_LOGI(TAG, "Motor %d: %d%% %s",
+                         i, current_motor_speeds[i] / 10,
+                         throttle_bar);
+            }
 
             last_logged_step = current_step;
-        }
-
-        // Track motor state for potential state change logging
-        is_now_running = (current_throttle > 0);
-        if (is_now_running != motor_running)
-        {
-            ESP_LOGI(TAG, "Motor %s", is_now_running ? "ON" : "OFF");
-            motor_running = is_now_running;
         }
 
         // Brief delay before next iteration
