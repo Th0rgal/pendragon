@@ -10,6 +10,7 @@
 #include "command_handler.h"
 #include "motor_control.h"
 #include "led_handler.h"
+#include "ble_handler.h"
 
 // Add near the top of the file, after the includes
 #define ENABLE_MAIN_LOGGING 0 // Set to 0 to disable main task logging
@@ -75,7 +76,8 @@ void debug_monitor_task(void *pvParameters)
 void app_main(void)
 {
     // Set log levels for different components
-    esp_log_level_set("SENSOR_MONITOR", ESP_LOG_INFO); // Ensure sensor logs are visible
+    esp_log_level_set("SENSOR_MONITOR", ESP_LOG_INFO);
+    esp_log_level_set("BLE_HANDLER", ESP_LOG_INFO);
 
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Flight Controller Starting...");
@@ -89,6 +91,14 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Initialize BLE
+    ret = init_ble();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize BLE");
+        return;
+    }
 
     // Create semaphore for task synchronization
     startup_sync_semaphore = xSemaphoreCreateBinary();

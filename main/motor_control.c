@@ -82,28 +82,38 @@ void set_motor_acceleration(motor_id_t motor, uint8_t ramp_rate)
         {
             motor_ramp_rates[i] = ramp_rate;
         }
+#if ENABLE_LOGGING
         ESP_LOGI(TAG, "All motors acceleration set to %d units per 100ms", ramp_rate);
+#endif
     }
     else if (motor < MOTOR_COUNT)
     {
         motor_ramp_rates[motor] = ramp_rate;
+#if ENABLE_LOGGING
         ESP_LOGI(TAG, "Motor %d acceleration set to %d units per 100ms", motor, ramp_rate);
+#endif
     }
     else
     {
+#if ENABLE_LOGGING
         ESP_LOGW(TAG, "Invalid motor ID: %d", motor);
+#endif
         return;
     }
 
     // Calculate approximate time for a full 0-1000 ramp
     float full_ramp_time = (1000.0f / ramp_rate) * 0.1f; // in seconds
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "Full throttle ramp will take approximately %.1f seconds", full_ramp_time);
+#endif
 }
 
 // Initialize motor PWM channels
 void init_motors(void)
 {
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "Initializing motor control for %d motors", MOTOR_COUNT);
+#endif
 
     // Configure timer
     ledc_timer_config_t timer_conf = {
@@ -126,7 +136,9 @@ void init_motors(void)
             .timer_sel = PWM_TIMER};
         ledc_channel_config(&channel_conf);
 
+#if ENABLE_LOGGING
         ESP_LOGI(TAG, "Motor %d initialized on GPIO%d (channel %d)", i, MOTOR_PINS[i], MOTOR_CHANNELS[i]);
+#endif
     }
 
     // Initialize default acceleration for all motors
@@ -256,8 +268,10 @@ static void drain_queues(sensor_data_t *sensor_data, flight_command_t *command)
         // Only log if we drained something significant
         if (drained_sensor > 5 || drained_command > 2)
         {
+#if ENABLE_LOGGING
             ESP_LOGI(TAG, "Drained %d sensor items and %d command items",
                      drained_sensor, drained_command);
+#endif
         }
     }
 }
@@ -275,7 +289,9 @@ void esc_control_task(void *pvParameters)
     int drain_counter = 0;
     UBaseType_t sensor_queue_items, command_queue_items;
 
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "ESC control task started");
+#endif
 
     // Get the synchronization semaphore
     SemaphoreHandle_t startup_sync = (SemaphoreHandle_t)pvParameters;
@@ -284,14 +300,20 @@ void esc_control_task(void *pvParameters)
     // as it is the consumer that needs to be ready before producers start
     if (startup_sync != NULL)
     {
+#if ENABLE_LOGGING
         ESP_LOGI(TAG, "Waiting for startup synchronization...");
+#endif
         if (xSemaphoreTake(startup_sync, pdMS_TO_TICKS(5000)) != pdTRUE)
         {
+#if ENABLE_LOGGING
             ESP_LOGW(TAG, "Timeout waiting for startup sync - proceeding anyway");
+#endif
         }
         else
         {
+#if ENABLE_LOGGING
             ESP_LOGI(TAG, "Received startup synchronization");
+#endif
             // Now we're the first to take the semaphore, so we'll hold it for a moment
             // to ensure we're ready to consume data before other tasks start producing
             vTaskDelay(200 / portTICK_PERIOD_MS);
@@ -302,16 +324,22 @@ void esc_control_task(void *pvParameters)
     }
 
     // Initial queue draining
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "Initial queue draining...");
+#endif
     drain_queues(&sensor_data, &command);
 
     // Brief initialization delay
     vTaskDelay(500 / portTICK_PERIOD_MS);
 
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "Starting ESC initialization sequence");
+#endif
 
     // Step 1: Set all motors to min throttle
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "Step 1: Setting minimum throttle for all motors");
+#endif
     set_motor_speed(MOTOR_ALL, 0); // Set all to minimum
 
     // During the 3-second wait, periodically drain queues to prevent overflow
@@ -322,7 +350,9 @@ void esc_control_task(void *pvParameters)
     }
 
     // Step 2: Test with a working throttle value for all motors
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "Step 2: Testing all motors with working throttle value (200)");
+#endif
     set_motor_speed(MOTOR_ALL, 200); // 20% throttle - should start spinning
 
     // During the 5-second wait, periodically drain queues to prevent overflow
@@ -332,7 +362,9 @@ void esc_control_task(void *pvParameters)
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
+#if ENABLE_LOGGING
     ESP_LOGI(TAG, "Starting test cycle");
+#endif
 
     // Define test steps with different accelerations
     const struct
@@ -396,9 +428,11 @@ void esc_control_task(void *pvParameters)
             set_motor_acceleration(MOTOR_ALL, test_steps[current_step].accel_rate);
 
             // Log when changing steps
+#if ENABLE_LOGGING
             ESP_LOGI(TAG, "Moving to %s (accel: %d)",
                      test_steps[current_step].description,
                      test_steps[current_step].accel_rate);
+#endif
 
             last_logged_step = current_step;
         }
@@ -422,7 +456,9 @@ void esc_control_task(void *pvParameters)
             is_now_running = (current_motor_speeds[i] > 0);
             if (is_now_running != motors_running[i])
             {
+#if ENABLE_LOGGING
                 ESP_LOGI(TAG, "Motor %d %s", i, is_now_running ? "ON" : "OFF");
+#endif
                 motors_running[i] = is_now_running;
             }
         }
@@ -430,9 +466,11 @@ void esc_control_task(void *pvParameters)
         // Log status only when step changes or every 50 iterations
         if (current_step != last_logged_step || log_counter % 50 == 0)
         {
+#if ENABLE_LOGGING
             ESP_LOGI(TAG, "%s (Acceleration: %d)",
                      test_steps[current_step].description,
                      test_steps[current_step].accel_rate);
+#endif
 
             // Log throttle for each motor
             for (int i = 0; i < MOTOR_COUNT; i++)
@@ -454,9 +492,11 @@ void esc_control_task(void *pvParameters)
                 }
 
                 // Show throttle percentage with visual indicator for each motor
+#if ENABLE_LOGGING
                 ESP_LOGI(TAG, "Motor %d: %d%% %s",
                          i, current_motor_speeds[i] / 10,
                          throttle_bar);
+#endif
             }
 
             last_logged_step = current_step;

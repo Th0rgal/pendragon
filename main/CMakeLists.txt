@@ -1,7 +1,16 @@
-idf_component_register(SRCS "main.c"
-                            "sensor_monitor.c"
-                            "command_handler.c"
-                            "motor_control.c"
-                            "led_handler.c"
-                       INCLUDE_DIRS "."
-                       REQUIRES driver led_strip nvs_flash)
+idf_component_register(
+    SRCS 
+        "main.c"
+        "motor_control.c"
+        "sensor_monitor.c"
+        "led_handler.c"
+        "command_handler.c"
+        "ble_handler.c"
+    INCLUDE_DIRS "."
+    REQUIRES 
+        driver
+        esp_timer
+        nvs_flash
+        bt
+        led_strip
+)
