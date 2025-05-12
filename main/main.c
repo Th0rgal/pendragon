@@ -6,7 +6,7 @@
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
 
-#include "sensor_monitor.h"
+// #include "sensor_monitor.h" // Removed
 #include "command_handler.h"
 #include "motor_control.h"
 #include "led_handler.h"
@@ -18,11 +18,11 @@
 static const char *TAG = "MAIN";
 
 // Queues for inter-task communication
-QueueHandle_t sensor_data_queue;
+// QueueHandle_t sensor_data_queue; // Removed
 QueueHandle_t command_queue;
 
 // Task handles for monitoring
-TaskHandle_t sensor_task_handle;
+// TaskHandle_t sensor_task_handle; // Removed
 TaskHandle_t command_task_handle;
 TaskHandle_t esc_task_handle;
 TaskHandle_t debug_task_handle;
@@ -42,15 +42,15 @@ void debug_monitor_task(void *pvParameters)
     {
 #if ENABLE_MAIN_LOGGING
         // Check if tasks are still running
-        eTaskState sensor_state = eTaskGetState(sensor_task_handle);
+        // eTaskState sensor_state = eTaskGetState(sensor_task_handle); // Removed
         eTaskState command_state = eTaskGetState(command_task_handle);
         eTaskState esc_state = eTaskGetState(esc_task_handle);
 
         ESP_LOGI(TAG, "System running - Tasks status:");
-        ESP_LOGI(TAG, "  Sensor task: %s",
-                 (sensor_state == eReady || sensor_state == eRunning || sensor_state == eBlocked)
-                     ? "ACTIVE"
-                     : "INACTIVE");
+        // ESP_LOGI(TAG, "  Sensor task: %s", // Removed
+        //          (sensor_state == eReady || sensor_state == eRunning || sensor_state == eBlocked) // Removed
+        //              ? "ACTIVE" // Removed
+        //              : "INACTIVE"); // Removed
         ESP_LOGI(TAG, "  Command task: %s",
                  (command_state == eReady || command_state == eRunning || command_state == eBlocked)
                      ? "ACTIVE"
@@ -64,7 +64,7 @@ void debug_monitor_task(void *pvParameters)
         ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
 #else
         // When logging is disabled, just check if tasks are still running without storing the state
-        eTaskGetState(sensor_task_handle);
+        // eTaskGetState(sensor_task_handle); // Removed
         eTaskGetState(command_task_handle);
         eTaskGetState(esc_task_handle);
 #endif
@@ -76,8 +76,9 @@ void debug_monitor_task(void *pvParameters)
 void app_main(void)
 {
     // Set log levels for different components
-    esp_log_level_set("SENSOR_MONITOR", ESP_LOG_INFO);
-    esp_log_level_set("BLE_HANDLER", ESP_LOG_INFO);
+    // esp_log_level_set("SENSOR_MONITOR", ESP_LOG_INFO); // Removed
+    esp_log_level_set("BLE_HANDLER", ESP_LOG_DEBUG);
+    esp_log_level_set("MOTOR_CONTROL", ESP_LOG_DEBUG);
 
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Flight Controller Starting...");
@@ -109,10 +110,10 @@ void app_main(void)
     }
 
     // Create queues for communication - increased to 50 items
-    sensor_data_queue = xQueueCreate(50, sizeof(sensor_data_t));
+    // sensor_data_queue = xQueueCreate(50, sizeof(sensor_data_t)); // Removed
     command_queue = xQueueCreate(50, sizeof(flight_command_t));
 
-    if (!sensor_data_queue || !command_queue)
+    if (/* !sensor_data_queue || */ !command_queue) // Adjusted condition
     {
         ESP_LOGE(TAG, "Failed to create queues");
         return;
@@ -120,9 +121,9 @@ void app_main(void)
 
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Queues created successfully");
-    ESP_LOGI(TAG, "Initializing sensors...");
+    // ESP_LOGI(TAG, "Initializing sensors..."); // Removed
 #endif
-    init_sensors();
+    // init_sensors(); // Removed
 
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Initializing motor control...");
@@ -134,8 +135,8 @@ void app_main(void)
 #endif
 
     // Create tasks with proper priorities
-    xTaskCreate(sensor_monitor_task, "sensor_monitor", 8192, (void *)startup_sync_semaphore, 6, &sensor_task_handle);
-    ESP_LOGI(TAG, "Sensor monitor task created");
+    // xTaskCreate(sensor_monitor_task, "sensor_monitor", 8192, (void *)startup_sync_semaphore, 6, &sensor_task_handle); // Removed
+    // ESP_LOGI(TAG, "Sensor monitor task created"); // Removed
 
     xTaskCreate(command_handler_task, "command_handler", 8192, (void *)startup_sync_semaphore, 5, &command_task_handle);
     ESP_LOGI(TAG, "Command handler task created");

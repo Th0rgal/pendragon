@@ -56,11 +56,38 @@ static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
         // Handle write request
         if (ctxt->om->om_len == sizeof(ble_command_t))
         {
-            ble_command_t cmd;
-            memcpy(&cmd, ctxt->om->om_data, sizeof(ble_command_t));
+            ble_command_t ble_cmd;
+            memcpy(&ble_cmd, ctxt->om->om_data, sizeof(ble_command_t));
             ESP_LOGI(TAG, "BLE Command Received: Throttle=%d, Pitch=%d, Roll=%d, Yaw=%d, Mode=%d",
-                     cmd.throttle, cmd.pitch, cmd.roll, cmd.yaw, cmd.mode);
-            // TODO: Add command processing logic (simplified for now)
+                     ble_cmd.throttle, ble_cmd.pitch, ble_cmd.roll, ble_cmd.yaw, ble_cmd.mode);
+
+            // Process the command and send it to the command_queue
+            flight_command_t flight_cmd;
+            flight_cmd.throttle = (float)ble_cmd.throttle / 255.0f;
+            // For now, set other controls to neutral/default
+            flight_cmd.pitch = 0.0f; // Neutral pitch
+            flight_cmd.roll = 0.0f;  // Neutral roll
+            flight_cmd.yaw = 0.0f;   // Neutral yaw
+            // Mode can determine arm status or other flight characteristics
+            // Example: mode 0 = disarmed, mode 1 = armed, mode 2 = armed + alt_hold etc.
+            // For simplicity, let's assume mode > 0 means armed for now.
+            flight_cmd.arm_status = (ble_cmd.mode > 0);
+
+            if (command_queue != NULL)
+            {
+                if (xQueueSend(command_queue, &flight_cmd, pdMS_TO_TICKS(10)) != pdPASS)
+                {
+                    ESP_LOGE(TAG, "Failed to send command to queue");
+                }
+                else
+                {
+                    ESP_LOGD(TAG, "Sent to command_queue: throttle=%.2f, arm=%d", flight_cmd.throttle, flight_cmd.arm_status);
+                }
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Command queue is NULL!");
+            }
         }
         else
         {
@@ -128,6 +155,32 @@ static int app_gap_event_handler(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "Disconnected; reason=%d", event->disconnect.reason);
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
+
+        // Failsafe: Send command to set throttle to 0 and disarm
+        ESP_LOGI(TAG, "BLE Disconnected. Sending disarm and zero throttle command.");
+        flight_command_t failsafe_cmd;
+        failsafe_cmd.throttle = 0.0f;
+        failsafe_cmd.pitch = 0.0f;
+        failsafe_cmd.roll = 0.0f;
+        failsafe_cmd.yaw = 0.0f;
+        failsafe_cmd.arm_status = false; // Disarm
+
+        if (command_queue != NULL)
+        {
+            if (xQueueSend(command_queue, &failsafe_cmd, pdMS_TO_TICKS(10)) != pdPASS)
+            {
+                ESP_LOGE(TAG, "Failed to send failsafe command to queue on disconnect");
+            }
+            else
+            {
+                ESP_LOGD(TAG, "Sent failsafe (disarm, zero throttle) to command_queue");
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Command queue is NULL! Cannot send failsafe on disconnect.");
+        }
+
         // Restart advertising
         app_advertise();
         return 0;

@@ -5,21 +5,23 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "sensor_monitor.h"  // For sensor_data_t
 #include "command_handler.h" // For flight_command_t
 
 // Queue handles declared in main.c
-extern QueueHandle_t sensor_data_queue;
 extern QueueHandle_t command_queue;
 
 // Utility macros
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
+// Define a default acceleration rate
+#define DEFAULT_MOTOR_ACCELERATION 25 // Units (0-1000 range) per 100ms. 25 gives a 4-second 0-1000 ramp.
+#define MOTOR_CONTROL_PERIOD_MS 100   // Loop period for motor control logic
+
 static const char *TAG = "MOTOR_CONTROL";
 
 // Constants for motor control
-#define ENABLE_LOGGING 0 // Set to 0 to disable logging
+#define ENABLE_LOGGING 1 // Set to 0 to disable logging
 
 // PWM Configuration
 #define PWM_FREQUENCY 50                 // 50Hz for standard ESCs
@@ -238,66 +240,28 @@ void set_motor_speed(motor_id_t motor, uint16_t speed)
     }
 }
 
-// Helper function to drain both queues - used during initialization and waiting periods
-static void drain_queues(sensor_data_t *sensor_data, flight_command_t *command)
-{
-    UBaseType_t sensor_queue_items = uxQueueMessagesWaiting(sensor_data_queue);
-    UBaseType_t command_queue_items = uxQueueMessagesWaiting(command_queue);
-
-    // If either queue has items, drain them
-    if (sensor_queue_items > 0 || command_queue_items > 0)
-    {
-        // Drain sensor data queue
-        int drained_sensor = 0;
-        while (xQueueReceive(sensor_data_queue, sensor_data, 0) == pdTRUE)
-        {
-            drained_sensor++;
-            if (drained_sensor >= 50)
-                break; // Safety limit
-        }
-
-        // Drain command queue
-        int drained_command = 0;
-        while (xQueueReceive(command_queue, command, 0) == pdTRUE)
-        {
-            drained_command++;
-            if (drained_command >= 10)
-                break; // Safety limit
-        }
-
-        // Only log if we drained something significant
-        if (drained_sensor > 5 || drained_command > 2)
-        {
-#if ENABLE_LOGGING
-            ESP_LOGI(TAG, "Drained %d sensor items and %d command items",
-                     drained_sensor, drained_command);
-#endif
-        }
-    }
-}
-
-// Task to control the ESCs/motors for testing
+// Task to control the ESCs/motors based on commands
 void esc_control_task(void *pvParameters)
 {
-    // Variables declared at the top to avoid redeclaration issues
-    sensor_data_t sensor_data;
-    flight_command_t command;
-    TickType_t drain_start_time, current_time, time_limit;
-    uint32_t step_counter, log_counter;
-    bool motors_running[MOTOR_COUNT] = {false};
-    bool is_now_running;
-    int drain_counter = 0;
-    UBaseType_t sensor_queue_items, command_queue_items;
+    flight_command_t received_command;
+    uint16_t target_throttles[MOTOR_COUNT];
+    static bool system_armed = false;
 
 #if ENABLE_LOGGING
     ESP_LOGI(TAG, "ESC control task started");
 #endif
 
+    // Initialize target throttles to 0
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        target_throttles[i] = 0;
+        current_motor_speeds[i] = 0; // Ensure current speeds also start at 0
+    }
+
     // Get the synchronization semaphore
     SemaphoreHandle_t startup_sync = (SemaphoreHandle_t)pvParameters;
 
-    // Wait for the synchronization signal from main - this should be the first task to take it
-    // as it is the consumer that needs to be ready before producers start
+    // Wait for the synchronization signal from main
     if (startup_sync != NULL)
     {
 #if ENABLE_LOGGING
@@ -314,195 +278,92 @@ void esc_control_task(void *pvParameters)
 #if ENABLE_LOGGING
             ESP_LOGI(TAG, "Received startup synchronization");
 #endif
-            // Now we're the first to take the semaphore, so we'll hold it for a moment
-            // to ensure we're ready to consume data before other tasks start producing
-            vTaskDelay(200 / portTICK_PERIOD_MS);
-
-            // Give back the semaphore to allow other tasks to proceed
+            vTaskDelay(pdMS_TO_TICKS(200)); // Brief delay
             xSemaphoreGive(startup_sync);
         }
     }
 
-    // Initial queue draining
-#if ENABLE_LOGGING
-    ESP_LOGI(TAG, "Initial queue draining...");
-#endif
-    drain_queues(&sensor_data, &command);
+    // Initialize motors
+    init_motors(); // This sets PWM to min throttle (0 speed)
 
-    // Brief initialization delay
-    vTaskDelay(500 / portTICK_PERIOD_MS);
+    // Set all motors to 0 speed explicitly after init, just in case.
+    set_motor_speed(MOTOR_ALL, 0);
 
-#if ENABLE_LOGGING
-    ESP_LOGI(TAG, "Starting ESC initialization sequence");
-#endif
-
-    // Step 1: Set all motors to min throttle
-#if ENABLE_LOGGING
-    ESP_LOGI(TAG, "Step 1: Setting minimum throttle for all motors");
-#endif
-    set_motor_speed(MOTOR_ALL, 0); // Set all to minimum
-
-    // During the 3-second wait, periodically drain queues to prevent overflow
-    for (int i = 0; i < 30; i++)
-    { // 30 * 100ms = 3000ms
-        drain_queues(&sensor_data, &command);
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-
-    // Step 2: Test with a working throttle value for all motors
-#if ENABLE_LOGGING
-    ESP_LOGI(TAG, "Step 2: Testing all motors with working throttle value (200)");
-#endif
-    set_motor_speed(MOTOR_ALL, 200); // 20% throttle - should start spinning
-
-    // During the 5-second wait, periodically drain queues to prevent overflow
-    for (int i = 0; i < 50; i++)
-    { // 50 * 100ms = 5000ms
-        drain_queues(&sensor_data, &command);
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
+    // Set default acceleration for all motors
+    set_motor_acceleration(MOTOR_ALL, DEFAULT_MOTOR_ACCELERATION);
 
 #if ENABLE_LOGGING
-    ESP_LOGI(TAG, "Starting test cycle");
+    ESP_LOGI(TAG, "Motor control initialized. Listening for commands.");
 #endif
-
-    // Define test steps with different accelerations
-    const struct
-    {
-        const char *description;
-        uint16_t throttle_value;
-        uint16_t duration_ds; // Duration in deciseconds (10 = 1 second)
-        uint8_t accel_rate;   // Acceleration rate for this step
-    } test_steps[] = {
-        {"Test 1: Off (value: 0)", 0, 30, 5},               // 3 seconds - standard accel
-        {"Test 2: Low speed (value: 250)", 250, 50, 5},     // 5 seconds - standard accel
-        {"Test 3: Medium speed (value: 500)", 500, 50, 10}, // 5 seconds - medium accel
-        {"Test 4: High speed (value: 750)", 750, 50, 15},   // 5 seconds - fast accel
-        {"Test 5: Max speed (value: 1000)", 1000, 30, 20},  // 3 seconds - very fast accel
-        {"Test 6: Medium-high (value: 750)", 750, 30, 15},  // 3 seconds - fast decel
-        {"Test 7: Medium (value: 500)", 500, 30, 10},       // 3 seconds - medium decel
-        {"Test 8: Low (value: 250)", 250, 30, 5},           // 3 seconds - standard decel
-        {"Test 9: Back to off", 0, 30, 5}                   // 3 seconds - standard decel
-    };
-
-    // Initialize variables for each motor
-    int current_step = 0;
-    int num_steps = sizeof(test_steps) / sizeof(test_steps[0]);
-    int last_logged_step = -1;
-    uint16_t target_throttles[MOTOR_COUNT];
-
-    for (int i = 0; i < MOTOR_COUNT; i++)
-    {
-        target_throttles[i] = test_steps[0].throttle_value;
-    }
-
-    step_counter = 0;
-    log_counter = 0;
-
-    // Start with standard acceleration for all motors
-    set_motor_acceleration(MOTOR_ALL, 5);
 
     // Main control loop
     while (1)
     {
-        // Drain any accumulated queue data before processing
-        drain_queues(&sensor_data, &command);
-
-        // Increment counters
-        log_counter++;
-        step_counter++;
-
-        // Check if it's time to move to the next step
-        if (step_counter >= test_steps[current_step].duration_ds)
+        // Check for new commands from the command_queue (non-blocking)
+        if (xQueueReceive(command_queue, &received_command, 0) == pdTRUE)
         {
-            current_step = (current_step + 1) % num_steps;
-            step_counter = 0;
+            system_armed = received_command.arm_status;
+            uint16_t new_target_throttle_val;
 
-            // Set the target throttle for all motors
-            for (int i = 0; i < MOTOR_COUNT; i++)
+            if (system_armed)
             {
-                target_throttles[i] = test_steps[current_step].throttle_value;
+                new_target_throttle_val = (uint16_t)(received_command.throttle * 1000.0f);
+            }
+            else
+            {
+                new_target_throttle_val = 0;
             }
 
-            // Set the acceleration rate for this step for all motors
-            set_motor_acceleration(MOTOR_ALL, test_steps[current_step].accel_rate);
+            new_target_throttle_val = MIN(MAX(new_target_throttle_val, 0), 1000); // Clamp to 0-1000
 
-            // Log when changing steps
+            for (int i = 0; i < MOTOR_COUNT; i++)
+            {
+                target_throttles[i] = new_target_throttle_val;
+            }
+
 #if ENABLE_LOGGING
-            ESP_LOGI(TAG, "Moving to %s (accel: %d)",
-                     test_steps[current_step].description,
-                     test_steps[current_step].accel_rate);
+            ESP_LOGD(TAG, "Command Rx: Throttle=%.2f, Arm=%d -> Target Speed=%u, System Armed=%d",
+                     received_command.throttle, received_command.arm_status, new_target_throttle_val, system_armed);
 #endif
-
-            last_logged_step = current_step;
         }
 
-        // Smoothly approach the target throttle for each motor
+        // Ramping logic: Smoothly approach the target throttle for each motor
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
+            uint16_t ramp_change_this_tick = motor_ramp_rates[i]; // motor_ramp_rates is units per 100ms
+
             if (current_motor_speeds[i] < target_throttles[i])
             {
-                current_motor_speeds[i] = MIN(current_motor_speeds[i] + motor_ramp_rates[i], target_throttles[i]);
+                current_motor_speeds[i] = MIN(current_motor_speeds[i] + ramp_change_this_tick, target_throttles[i]);
             }
             else if (current_motor_speeds[i] > target_throttles[i])
             {
-                current_motor_speeds[i] = MAX(current_motor_speeds[i] - motor_ramp_rates[i], target_throttles[i]);
+                current_motor_speeds[i] = MAX(current_motor_speeds[i] - ramp_change_this_tick, target_throttles[i]);
             }
-
-            // Apply current throttle value to each motor
-            set_motor_speed(i, current_motor_speeds[i]);
-
-            // Track motor state for potential state change logging
-            is_now_running = (current_motor_speeds[i] > 0);
-            if (is_now_running != motors_running[i])
-            {
-#if ENABLE_LOGGING
-                ESP_LOGI(TAG, "Motor %d %s", i, is_now_running ? "ON" : "OFF");
-#endif
-                motors_running[i] = is_now_running;
-            }
+            set_motor_speed(i, current_motor_speeds[i]); // Apply the new speed to the motor
         }
 
-        // Log status only when step changes or every 50 iterations
-        if (current_step != last_logged_step || log_counter % 50 == 0)
+        // Drain sensor data queue (as we are not using sensor data in this task currently)
+        /* // Removed sensor data queue drain
+        while (xQueueReceive(sensor_data_queue, &temp_sensor_data, 0) == pdTRUE)
+        {
+            // Discard data
+        }
+        */
+
+        // Logging (throttled)
+        static int log_counter = 0;
+        if (++log_counter % (1000 / MOTOR_CONTROL_PERIOD_MS) == 0) // Log every 1 second
         {
 #if ENABLE_LOGGING
-            ESP_LOGI(TAG, "%s (Acceleration: %d)",
-                     test_steps[current_step].description,
-                     test_steps[current_step].accel_rate);
+            ESP_LOGI(TAG, "Motor Speeds: TR:%3u, BR:%3u, TL:%3u, BL:%3u (Targets: All %3u)",
+                     current_motor_speeds[MOTOR_TOP_RIGHT], current_motor_speeds[MOTOR_BOTTOM_RIGHT],
+                     current_motor_speeds[MOTOR_TOP_LEFT], current_motor_speeds[MOTOR_BOTTOM_LEFT],
+                     target_throttles[0]); // Assuming collective throttle
 #endif
-
-            // Log throttle for each motor
-            for (int i = 0; i < MOTOR_COUNT; i++)
-            {
-                // Add visual indicator for throttle percentage
-                char throttle_bar[21] = "[                    ]";
-                int bar_length = 20;
-                int fill_amount = (current_motor_speeds[i] * bar_length) / 1000;
-
-                for (int j = 0; j < fill_amount; j++)
-                {
-                    throttle_bar[j + 1] = '=';
-                }
-
-                // Add a position marker
-                if (fill_amount < bar_length)
-                {
-                    throttle_bar[fill_amount + 1] = '>';
-                }
-
-                // Show throttle percentage with visual indicator for each motor
-#if ENABLE_LOGGING
-                ESP_LOGI(TAG, "Motor %d: %d%% %s",
-                         i, current_motor_speeds[i] / 10,
-                         throttle_bar);
-#endif
-            }
-
-            last_logged_step = current_step;
         }
 
-        // Brief delay before next iteration
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        // Delay for the motor control loop period
+        vTaskDelay(pdMS_TO_TICKS(MOTOR_CONTROL_PERIOD_MS));
     }
 }

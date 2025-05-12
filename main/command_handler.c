@@ -86,6 +86,7 @@ void command_handler_task(void *pvParameters)
         }
 
         // Send command to queue with more intelligent backoff strategy
+        /* // Temporarily disabled to prevent interference with BLE commands
         if (xQueueSend(command_queue, &command, pdMS_TO_TICKS(10)) == pdTRUE)
         {
             // Success - reset backoff
@@ -109,6 +110,7 @@ void command_handler_task(void *pvParameters)
             // Add a small additional delay on failure to help system recover
             vTaskDelay(20 / portTICK_PERIOD_MS);
         }
+        */
 
         // Command processing frequency - reduced from 10Hz to 5Hz
         vTaskDelay(200 / portTICK_PERIOD_MS); // 5Hz
