@@ -34,7 +34,7 @@ static const char *TAG = "MOTOR_CONTROL";
 
 // Motor pins for each motor
 const uint8_t MOTOR_PINS[MOTOR_COUNT] = {
-    10, // MOTOR_TOP_RIGHT (GPIO 10)
+    5,  // MOTOR_TOP_RIGHT (GPIO 10)
     9,  // MOTOR_BOTTOM_RIGHT (GPIO 9)
     18, // MOTOR_TOP_LEFT (GPIO 18)
     17  // MOTOR_BOTTOM_LEFT (GPIO 17)
