@@ -21,7 +21,7 @@ extern QueueHandle_t command_queue;
 static const char *TAG = "MOTOR_CONTROL";
 
 // Constants for motor control
-#define ENABLE_LOGGING 1 // Set to 0 to disable logging
+#define ENABLE_LOGGING 0 // Set to 0 to disable logging
 
 // PWM Configuration
 #define PWM_FREQUENCY 50                 // 50Hz for standard ESCs

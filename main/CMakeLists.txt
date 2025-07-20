@@ -5,6 +5,8 @@ idf_component_register(
         "led_handler.c"
         "command_handler.c"
         "ble_handler.c"
+        "dps310_sensor.c"
+        "icm42688p_sensor.c"
     INCLUDE_DIRS "."
     REQUIRES 
         driver
