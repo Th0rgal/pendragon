@@ -5,7 +5,8 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "command_handler.h" // For flight_command_t
+#include "command_handler.h"  // For flight_command_t
+#include "icm42688p_sensor.h" // For IMU data
 
 // Queue handles declared in main.c
 extern QueueHandle_t command_queue;
@@ -32,12 +33,20 @@ static const char *TAG = "MOTOR_CONTROL";
 // Motor pin and channel configuration
 #define MOTOR_COUNT 4
 
-// Motor pins for each motor
+// Motor pins for each motor (PWM outputs)
+// ESC harness (colors):
+//   - GND:   Black  → ESP32 GND (common ground)
+//   - V:     Red    → 15V from ESC (DO NOT FEED ESP32 DIRECTLY). Use a buck to 5V → ESP32 5V0.
+//   - 1:     White  → Motor TOP_RIGHT signal → GPIO 5
+//   - 2:     Brown  → Motor BOTTOM_RIGHT signal → GPIO 13
+//   - 3:     Orange → Motor TOP_LEFT signal → GPIO 18
+//   - 4:     Yellow → Motor BOTTOM_LEFT signal → GPIO 17
+//   - C/NC:  Not connected
 const uint8_t MOTOR_PINS[MOTOR_COUNT] = {
-    5,  // MOTOR_TOP_RIGHT (GPIO 10)
-    9,  // MOTOR_BOTTOM_RIGHT (GPIO 9)
-    18, // MOTOR_TOP_LEFT (GPIO 18)
-    17  // MOTOR_BOTTOM_LEFT (GPIO 17)
+    5,  // MOTOR_TOP_RIGHT (GPIO 5)  - ESC wire 1 (White)
+    13, // MOTOR_BOTTOM_RIGHT (GPIO 13) - ESC wire 2 (Brown)
+    18, // MOTOR_TOP_LEFT (GPIO 18) - ESC wire 3 (Orange)
+    17  // MOTOR_BOTTOM_LEFT (GPIO 17) - ESC wire 4 (Yellow)
 };
 
 // LEDC channels for each motor
@@ -56,6 +65,7 @@ const uint8_t MOTOR_CHANNELS[MOTOR_COUNT] = {
 // Global state
 static uint8_t motor_ramp_rates[MOTOR_COUNT] = {5, 5, 5, 5};      // Default ramp rate (units per 100ms)
 static uint16_t current_motor_speeds[MOTOR_COUNT] = {0, 0, 0, 0}; // Current speed for each motor
+static bool stabilization_enabled = false;
 
 // Calculate PWM duty cycle from pulse width in microseconds
 static uint32_t pulse_us_to_duty(uint32_t pulse_us)
@@ -110,6 +120,11 @@ void set_motor_acceleration(motor_id_t motor, uint8_t ramp_rate)
 #endif
 }
 
+void set_stabilization_enabled(bool enabled)
+{
+    stabilization_enabled = enabled;
+}
+
 // Initialize motor PWM channels
 void init_motors(void)
 {
@@ -123,7 +138,7 @@ void init_motors(void)
         .timer_num = PWM_TIMER,
         .duty_resolution = PWM_RESOLUTION,
         .freq_hz = PWM_FREQUENCY,
-        .clk_cfg = LEDC_AUTO_CLK};
+        .clk_cfg = LEDC_USE_APB_CLK};
     ledc_timer_config(&timer_conf);
 
     // Configure all motor channels
@@ -303,6 +318,7 @@ void esc_control_task(void *pvParameters)
         if (xQueueReceive(command_queue, &received_command, 0) == pdTRUE)
         {
             system_armed = received_command.arm_status;
+            set_stabilization_enabled(received_command.stabilize);
             uint16_t new_target_throttle_val;
 
             if (system_armed)
@@ -322,12 +338,23 @@ void esc_control_task(void *pvParameters)
             }
 
 #if ENABLE_LOGGING
-            ESP_LOGD(TAG, "Command Rx: Throttle=%.2f, Arm=%d -> Target Speed=%u, System Armed=%d",
-                     received_command.throttle, received_command.arm_status, new_target_throttle_val, system_armed);
+            ESP_LOGD(TAG, "Command Rx: Throttle=%.2f, Arm=%d -> Target Speed=%u, Stabilize=%d",
+                     received_command.throttle, received_command.arm_status, new_target_throttle_val, stabilization_enabled);
 #endif
         }
 
-        // Ramping logic: Smoothly approach the target throttle for each motor
+        // Ramping logic with simple stabilization
+        // Read IMU once per loop if needed
+        icm42688p_data_t imu;
+        bool imu_ok = false;
+        if (stabilization_enabled && system_armed)
+        {
+            if (icm42688p_read_data(&imu) == ESP_OK)
+            {
+                imu_ok = true;
+            }
+        }
+
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
             uint16_t ramp_change_this_tick = motor_ramp_rates[i]; // motor_ramp_rates is units per 100ms
@@ -340,27 +367,30 @@ void esc_control_task(void *pvParameters)
             {
                 current_motor_speeds[i] = MAX(current_motor_speeds[i] - ramp_change_this_tick, target_throttles[i]);
             }
-            set_motor_speed(i, current_motor_speeds[i]); // Apply the new speed to the motor
         }
 
-        // Drain sensor data queue (as we are not using sensor data in this task currently)
-        /* // Removed sensor data queue drain
-        while (xQueueReceive(sensor_data_queue, &temp_sensor_data, 0) == pdTRUE)
+        // Apply a very naive P correction using accel as attitude proxy
+        if (imu_ok)
         {
-            // Discard data
-        }
-        */
+            float kP = 50.0f; // tune low; units: PWM units per g error
+            int16_t d_pitch = (int16_t)(-kP * imu.accel_x);
+            int16_t d_roll = (int16_t)(-kP * imu.accel_y);
 
-        // Logging (throttled)
-        static int log_counter = 0;
-        if (++log_counter % (1000 / MOTOR_CONTROL_PERIOD_MS) == 0) // Log every 1 second
+            int32_t tr = current_motor_speeds[MOTOR_TOP_RIGHT] + (-d_pitch) + (-d_roll);
+            int32_t br = current_motor_speeds[MOTOR_BOTTOM_RIGHT] + (d_pitch) + (-d_roll);
+            int32_t tl = current_motor_speeds[MOTOR_TOP_LEFT] + (-d_pitch) + (d_roll);
+            int32_t bl = current_motor_speeds[MOTOR_BOTTOM_LEFT] + (d_pitch) + (d_roll);
+
+            current_motor_speeds[MOTOR_TOP_RIGHT] = (uint16_t)MIN(MAX(tr, 0), 1000);
+            current_motor_speeds[MOTOR_BOTTOM_RIGHT] = (uint16_t)MIN(MAX(br, 0), 1000);
+            current_motor_speeds[MOTOR_TOP_LEFT] = (uint16_t)MIN(MAX(tl, 0), 1000);
+            current_motor_speeds[MOTOR_BOTTOM_LEFT] = (uint16_t)MIN(MAX(bl, 0), 1000);
+        }
+
+        // Write PWM
+        for (int i = 0; i < MOTOR_COUNT; i++)
         {
-#if ENABLE_LOGGING
-            ESP_LOGI(TAG, "Motor Speeds: TR:%3u, BR:%3u, TL:%3u, BL:%3u (Targets: All %3u)",
-                     current_motor_speeds[MOTOR_TOP_RIGHT], current_motor_speeds[MOTOR_BOTTOM_RIGHT],
-                     current_motor_speeds[MOTOR_TOP_LEFT], current_motor_speeds[MOTOR_BOTTOM_LEFT],
-                     target_throttles[0]); // Assuming collective throttle
-#endif
+            set_motor_speed(i, current_motor_speeds[i]);
         }
 
         // Delay for the motor control loop period

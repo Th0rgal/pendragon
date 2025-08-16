@@ -12,7 +12,7 @@ typedef struct
     float pitch;     // -1.0 to 1.0
     float yaw;       // -1.0 to 1.0
     bool arm_status; // true = armed, false = disarmed
-    // TODO: Add more command parameters as needed
+    bool stabilize;  // true = enable simple stabilization mode
 } flight_command_t;
 
 // External queue declaration

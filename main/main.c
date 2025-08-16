@@ -11,15 +11,11 @@
 #include "motor_control.h"
 #include "led_handler.h"
 #include "ble_handler.h"
-#if ENABLE_DPS310
-#include "dps310_sensor.h"
-#endif
 #include "icm42688p_sensor.h" // new include
 
 // Add near the top of the file, after the includes
 #define ENABLE_MAIN_LOGGING 0  // Set to 0 to disable main task logging
-#define ENABLE_MOTOR_CONTROL 0 // Set to 0 to disable motor control (disconnected)
-#define ENABLE_DPS310 0        // Set to 1 to enable DPS310 barometer
+#define ENABLE_MOTOR_CONTROL 1 // Enable motor control (ESC PWM)
 
 static const char *TAG = "MAIN";
 
@@ -33,9 +29,6 @@ TaskHandle_t command_task_handle;
 TaskHandle_t esc_task_handle;
 TaskHandle_t debug_task_handle;
 TaskHandle_t led_task_handle;
-#if ENABLE_DPS310
-TaskHandle_t dps310_task_handle;
-#endif
 TaskHandle_t icm42688p_task_handle;
 
 // Semaphore for task synchronization
@@ -72,17 +65,6 @@ void debug_monitor_task(void *pvParameters)
         }
 #endif
 
-#if ENABLE_DPS310
-        if (dps310_task_handle != NULL)
-        {
-            eTaskState dps310_state = eTaskGetState(dps310_task_handle);
-            ESP_LOGI(TAG, "  DPS310 task: %s",
-                     (dps310_state == eReady || dps310_state == eRunning || dps310_state == eBlocked)
-                         ? "ACTIVE"
-                         : "INACTIVE");
-        }
-#endif
-
         if (icm42688p_task_handle != NULL)
         {
             eTaskState icm_state = eTaskGetState(icm42688p_task_handle);
@@ -107,12 +89,6 @@ void debug_monitor_task(void *pvParameters)
             eTaskGetState(esc_task_handle);
         }
 #endif
-#if ENABLE_DPS310
-        if (dps310_task_handle != NULL)
-        {
-            eTaskGetState(dps310_task_handle);
-        }
-#endif
         if (icm42688p_task_handle != NULL)
         {
             eTaskGetState(icm42688p_task_handle);
@@ -133,7 +109,6 @@ void app_main(void)
 #else
     esp_log_level_set("MOTOR_CONTROL", ESP_LOG_WARN); // Reduce motor logging when disabled
 #endif
-    esp_log_level_set("DPS310_SENSOR", ESP_LOG_DEBUG);
 
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Flight Controller Starting...");
@@ -212,11 +187,6 @@ void app_main(void)
 
     // Create LED task
     xTaskCreate(led_handler_task, "led_handler", 4096, NULL, 2, &led_task_handle);
-
-#if ENABLE_DPS310
-    // Create DPS310 sensor task
-    xTaskCreate(dps310_sensor_task, "dps310_sensor", 8192, NULL, 3, &dps310_task_handle);
-#endif
 
     // Create ICM-42688-P sensor task
     xTaskCreate(icm42688p_sensor_task, "icm42688p_sensor", 8192, NULL, 3, &icm42688p_task_handle);

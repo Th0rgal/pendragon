@@ -72,6 +72,7 @@ static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
             // Example: mode 0 = disarmed, mode 1 = armed, mode 2 = armed + alt_hold etc.
             // For simplicity, let's assume mode > 0 means armed for now.
             flight_cmd.arm_status = (ble_cmd.mode > 0);
+            flight_cmd.stabilize = (ble_cmd.mode == 2); // mode==2 enables simple stabilization
 
             if (command_queue != NULL)
             {

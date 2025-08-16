@@ -1,16 +1,17 @@
 #ifndef MOTOR_CONTROL_H
 #define MOTOR_CONTROL_H
 
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
 // Motor identifiers
 typedef enum
 {
-    MOTOR_TOP_RIGHT = 0,    // GPIO 10
-    MOTOR_BOTTOM_RIGHT = 1, // GPIO 9
-    MOTOR_TOP_LEFT = 2,     // GPIO 18
-    MOTOR_BOTTOM_LEFT = 3,  // GPIO 17
+    MOTOR_TOP_RIGHT = 0,    // GPIO 5   (ESC wire 1: White)
+    MOTOR_BOTTOM_RIGHT = 1, // GPIO 13  (ESC wire 2: Brown)
+    MOTOR_TOP_LEFT = 2,     // GPIO 18  (ESC wire 3: Orange)
+    MOTOR_BOTTOM_LEFT = 3,  // GPIO 17  (ESC wire 4: Yellow)
     MOTOR_ALL = 255         // Special value to control all motors
 } motor_id_t;
 
@@ -27,6 +28,9 @@ typedef struct
 void init_motors(void);
 void set_motor_speed(motor_id_t motor, uint16_t speed);
 void set_motor_acceleration(motor_id_t motor, uint8_t ramp_rate);
+
+// Stabilization control
+void set_stabilization_enabled(bool enabled);
 
 // ESC control functions
 void esc_control_task(void *pvParameters);

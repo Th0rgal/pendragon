@@ -7,7 +7,7 @@
 #include <math.h>
 #include <string.h>
 
-#define ENABLE_ICM42688P_LOGGING 1     // high-level data prints
+#define ENABLE_ICM42688P_LOGGING 0     // high-level data prints (disabled)
 #define ENABLE_ICM42688P_REG_LOGGING 0 // per-register SPI logs (noisy)
 #define LOG_THROTTLE_MS 100
 static uint32_t last_log_ms = 0;
