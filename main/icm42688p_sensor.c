@@ -3,6 +3,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <math.h>
 #include <string.h>
@@ -64,6 +65,16 @@ static const struct
 #define GYRO_SENS_2000DPS 16.4f   // LSB/deg/s for ±2000dps range
 
 static spi_device_handle_t icm_spi;
+static SemaphoreHandle_t icm_mutex;
+
+static esp_err_t icm42688p_ensure_mutex(void)
+{
+    if (icm_mutex)
+        return ESP_OK;
+
+    icm_mutex = xSemaphoreCreateMutex();
+    return icm_mutex ? ESP_OK : ESP_ERR_NO_MEM;
+}
 
 // ===== Low-level SPI helpers =====
 static esp_err_t icm42688p_spi_write_reg(uint8_t reg, uint8_t data)
@@ -103,6 +114,19 @@ esp_err_t icm42688p_init(void)
 #if ENABLE_ICM42688P_LOGGING
     ESP_LOGI(TAG, "Initializing ICM-42688-P...");
 #endif
+    esp_err_t ret = icm42688p_ensure_mutex();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to create ICM mutex: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (xSemaphoreTake(icm_mutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    {
+        ESP_LOGE(TAG, "Timed out waiting for ICM mutex during init");
+        return ESP_ERR_TIMEOUT;
+    }
+
     // Initialize SPI bus (may already be done by other drivers)
     spi_bus_config_t bus_cfg = {
         .miso_io_num = icm_cfg.miso_pin,
@@ -112,10 +136,11 @@ esp_err_t icm42688p_init(void)
         .quadhd_io_num = -1,
         .max_transfer_sz = 32,
     };
-    esp_err_t ret = spi_bus_initialize(ICM42688P_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    ret = spi_bus_initialize(ICM42688P_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
     {
         ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+        xSemaphoreGive(icm_mutex);
         return ret;
     }
 
@@ -129,6 +154,7 @@ esp_err_t icm42688p_init(void)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "SPI add device failed: %s", esp_err_to_name(ret));
+        xSemaphoreGive(icm_mutex);
         return ret;
     }
 
@@ -140,11 +166,13 @@ esp_err_t icm42688p_init(void)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to read WHO_AM_I: %s", esp_err_to_name(ret));
+        xSemaphoreGive(icm_mutex);
         return ret;
     }
     if (who != ICM42688P_WHO_AM_I_VALUE)
     {
         ESP_LOGE(TAG, "Unexpected WHO_AM_I 0x%02X (expected 0x%02X)", who, ICM42688P_WHO_AM_I_VALUE);
+        xSemaphoreGive(icm_mutex);
         return ESP_ERR_INVALID_RESPONSE;
     }
 #if ENABLE_ICM42688P_LOGGING
@@ -189,6 +217,7 @@ esp_err_t icm42688p_init(void)
 #if ENABLE_ICM42688P_LOGGING
     ESP_LOGI(TAG, "ICM-42688-P initialization complete");
 #endif
+    xSemaphoreGive(icm_mutex);
     return ESP_OK;
 }
 
@@ -196,12 +225,16 @@ esp_err_t icm42688p_read_data(icm42688p_data_t *out)
 {
     if (!out)
         return ESP_ERR_INVALID_ARG;
+    if (!icm_spi || !icm_mutex)
+        return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(icm_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
 
     // Check data ready status
     uint8_t status;
     esp_err_t ret = icm42688p_spi_read_reg(ICM42688P_REG_INT_STATUS, &status);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
 
     // Bit 0 = UI_DRDY (data ready)
     if (!(status & 0x01))
@@ -224,64 +257,64 @@ esp_err_t icm42688p_read_data(icm42688p_data_t *out)
     // Temperature (TEMP_DATA1, TEMP_DATA0)
     ret = icm42688p_spi_read_reg(ICM42688P_REG_TEMP_DATA1, &hi);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     ret = icm42688p_spi_read_reg(ICM42688P_REG_TEMP_DATA0, &lo);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     int16_t temp_raw = (hi << 8) | lo;
 
     // Accelerometer X (ACCEL_DATA_X1, ACCEL_DATA_X0)
     ret = icm42688p_spi_read_reg(ICM42688P_REG_ACCEL_DATA_X1, &hi);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     ret = icm42688p_spi_read_reg(ICM42688P_REG_ACCEL_DATA_X0, &lo);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     int16_t accel_x_raw = (hi << 8) | lo;
 
     // Accelerometer Y (ACCEL_DATA_Y1, ACCEL_DATA_Y0)
     ret = icm42688p_spi_read_reg(ICM42688P_REG_ACCEL_DATA_Y1, &hi);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     ret = icm42688p_spi_read_reg(ICM42688P_REG_ACCEL_DATA_Y0, &lo);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     int16_t accel_y_raw = (hi << 8) | lo;
 
     // Accelerometer Z (ACCEL_DATA_Z1, ACCEL_DATA_Z0)
     ret = icm42688p_spi_read_reg(ICM42688P_REG_ACCEL_DATA_Z1, &hi);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     ret = icm42688p_spi_read_reg(ICM42688P_REG_ACCEL_DATA_Z0, &lo);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     int16_t accel_z_raw = (hi << 8) | lo;
 
     // Gyroscope X (GYRO_DATA_X1, GYRO_DATA_X0)
     ret = icm42688p_spi_read_reg(ICM42688P_REG_GYRO_DATA_X1, &hi);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     ret = icm42688p_spi_read_reg(ICM42688P_REG_GYRO_DATA_X0, &lo);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     int16_t gyro_x_raw = (hi << 8) | lo;
 
     // Gyroscope Y (GYRO_DATA_Y1, GYRO_DATA_Y0)
     ret = icm42688p_spi_read_reg(ICM42688P_REG_GYRO_DATA_Y1, &hi);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     ret = icm42688p_spi_read_reg(ICM42688P_REG_GYRO_DATA_Y0, &lo);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     int16_t gyro_y_raw = (hi << 8) | lo;
 
     // Gyroscope Z (GYRO_DATA_Z1, GYRO_DATA_Z0)
     ret = icm42688p_spi_read_reg(ICM42688P_REG_GYRO_DATA_Z1, &hi);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     ret = icm42688p_spi_read_reg(ICM42688P_REG_GYRO_DATA_Z0, &lo);
     if (ret != ESP_OK)
-        return ret;
+        goto done;
     int16_t gyro_z_raw = (hi << 8) | lo;
 
     // Convert raw values to physical units
@@ -319,7 +352,11 @@ esp_err_t icm42688p_read_data(icm42688p_data_t *out)
     }
 #endif
 
-    return ESP_OK;
+    ret = ESP_OK;
+
+done:
+    xSemaphoreGive(icm_mutex);
+    return ret;
 }
 
 void icm42688p_sensor_task(void *pvParameters)
@@ -343,11 +380,17 @@ void icm42688p_sensor_task(void *pvParameters)
 
 esp_err_t icm42688p_deinit(void)
 {
+    if (icm_mutex && xSemaphoreTake(icm_mutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+
     if (icm_spi)
     {
         spi_bus_remove_device(icm_spi);
         icm_spi = NULL;
     }
     spi_bus_free(ICM42688P_SPI_HOST);
+
+    if (icm_mutex)
+        xSemaphoreGive(icm_mutex);
     return ESP_OK;
 }
