@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "ble_handler.h"
 #include "motor_control.h"
+#include "icm42688p_sensor.h"
 
 static const char *TAG = "BLE_HANDLER";
 
@@ -153,6 +154,27 @@ static void send_info_telemetry(const char *prefix)
              esp_get_free_heap_size(),
              (unsigned)ota_received_size,
              (unsigned)ota_expected_size);
+    ble_log_str("DBG", message);
+}
+
+static void send_sensor_telemetry(void)
+{
+    icm42688p_data_t data = {0};
+    esp_err_t ret = icm42688p_read_data(&data);
+    if (ret != ESP_OK)
+    {
+        char message[80];
+        snprintf(message, sizeof(message), "sensor read failed: %s", esp_err_to_name(ret));
+        ble_log_str("DBG", message);
+        return;
+    }
+
+    char message[180];
+    snprintf(message, sizeof(message),
+             "sensor ax=%.3f ay=%.3f az=%.3f gx=%.1f gy=%.1f gz=%.1f temp=%.1fC t=%lu",
+             data.accel_x, data.accel_y, data.accel_z,
+             data.gyro_x, data.gyro_y, data.gyro_z,
+             data.temperature, data.timestamp);
     ble_log_str("DBG", message);
 }
 
@@ -355,6 +377,9 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
         return 0;
     case PENDRAGON_BLE_CMD_INFO:
         send_info_telemetry("info");
+        return 0;
+    case PENDRAGON_BLE_CMD_SENSOR_SNAPSHOT:
+        send_sensor_telemetry();
         return 0;
     case PENDRAGON_BLE_CMD_OTA_BEGIN:
         return handle_ota_begin(payload, len);
