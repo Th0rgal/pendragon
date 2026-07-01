@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdio.h>
 #include "esp_log.h"
 #include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
@@ -10,15 +11,16 @@
 #include "nvs_flash.h"
 #include "esp_bt.h"
 #include "ble_handler.h"
-#include "command_handler.h"
+#include "motor_control.h"
 
 static const char *TAG = "BLE_HANDLER";
 
 // BLE connection handle
 static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
 
-// BLE characteristic handle - to be assigned in app_gatt_register_cb
-static uint16_t drone_char_handle = 0;
+// BLE characteristic handles - to be assigned in app_gatt_register_cb
+static uint16_t command_char_handle = 0;
+static uint16_t telemetry_char_handle = 0;
 
 // BLE Address information
 static uint8_t own_addr_type;
@@ -42,6 +44,11 @@ static const ble_uuid128_t DRONE_CHARACTERISTIC_UUID128 = {
     .value = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
               0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00}};
 
+static const ble_uuid128_t TELEMETRY_CHARACTERISTIC_UUID128 = {
+    .u = {.type = BLE_UUID_TYPE_128},
+    .value = {0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99,
+              0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11}};
+
 // BLE GAP access callback
 static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -53,49 +60,39 @@ static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
         return 0;
 
     case BLE_GATT_ACCESS_OP_WRITE_CHR:
-        // Handle write request
-        if (ctxt->om->om_len == sizeof(ble_command_t))
+        // Handle write request: opcode-based protocol
+        if (ctxt->om->om_len >= 1)
         {
-            ble_command_t ble_cmd;
-            memcpy(&ble_cmd, ctxt->om->om_data, sizeof(ble_command_t));
-            ESP_LOGI(TAG, "BLE Command Received: Throttle=%d, Pitch=%d, Roll=%d, Yaw=%d, Mode=%d",
-                     ble_cmd.throttle, ble_cmd.pitch, ble_cmd.roll, ble_cmd.yaw, ble_cmd.mode);
-
-            // Process the command and send it to the command_queue
-            flight_command_t flight_cmd;
-            flight_cmd.throttle = (float)ble_cmd.throttle / 255.0f;
-            // For now, set other controls to neutral/default
-            flight_cmd.pitch = 0.0f; // Neutral pitch
-            flight_cmd.roll = 0.0f;  // Neutral roll
-            flight_cmd.yaw = 0.0f;   // Neutral yaw
-            // Mode can determine arm status or other flight characteristics
-            // Example: mode 0 = disarmed, mode 1 = armed, mode 2 = armed + alt_hold etc.
-            // For simplicity, let's assume mode > 0 means armed for now.
-            flight_cmd.arm_status = (ble_cmd.mode > 0);
-            flight_cmd.stabilize = (ble_cmd.mode == 2); // mode==2 enables simple stabilization
-
-            if (command_queue != NULL)
+            const uint8_t *payload = ctxt->om->om_data;
+            uint8_t opcode = payload[0];
+            if (opcode >= 0xA0)
             {
-                if (xQueueSend(command_queue, &flight_cmd, pdMS_TO_TICKS(10)) != pdPASS)
+                uint16_t step = 50; // default step in 0..1000 domain
+                if (ctxt->om->om_len >= 2)
                 {
-                    ESP_LOGE(TAG, "Failed to send command to queue");
+                    step = payload[1];
+                    // map 0..255 => 0..255 for now; allow >255 later via 2 bytes if needed
+                    if (step == 0)
+                        step = 50;
                 }
-                else
+                switch ((ble_cmd_opcode_t)opcode)
                 {
-                    ESP_LOGD(TAG, "Sent to command_queue: throttle=%.2f, arm=%d", flight_cmd.throttle, flight_cmd.arm_status);
+                case BLE_CMD_POWER_UP:
+                    ESP_LOGI(TAG, "BLE: POWER_UP step=%u", step);
+                    motor_adjust_power(step);
+                    return 0;
+                case BLE_CMD_POWER_DOWN:
+                    ESP_LOGI(TAG, "BLE: POWER_DOWN step=%u", step);
+                    motor_adjust_power(-(int16_t)step);
+                    return 0;
+                default:
+                    ESP_LOGW(TAG, "BLE: Unknown opcode 0x%02X", opcode);
+                    return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
                 }
             }
-            else
-            {
-                ESP_LOGE(TAG, "Command queue is NULL!");
-            }
         }
-        else
-        {
-            ESP_LOGW(TAG, "GATT Write: Received data of len %d, expected %d for ble_command_t",
-                     ctxt->om->om_len, sizeof(ble_command_t));
-        }
-        return 0;
+        ESP_LOGW(TAG, "GATT Write: Unsupported payload length=%d", ctxt->om->om_len);
+        return BLE_ATT_ERR_UNLIKELY;
 
     default:
         return BLE_ATT_ERR_UNLIKELY;
@@ -111,8 +108,14 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             {
                 .uuid = &DRONE_CHARACTERISTIC_UUID128.u,
                 .access_cb = ble_gap_access_cb,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
-                .val_handle = &drone_char_handle, // Assign characteristic value handle pointer
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .val_handle = &command_char_handle,
+            },
+            {
+                .uuid = &TELEMETRY_CHARACTERISTIC_UUID128.u,
+                .access_cb = ble_gap_access_cb,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &telemetry_char_handle,
             },
             {
                 0, // No more characteristics
@@ -157,30 +160,8 @@ static int app_gap_event_handler(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "Disconnected; reason=%d", event->disconnect.reason);
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
 
-        // Failsafe: Send command to set throttle to 0 and disarm
-        ESP_LOGI(TAG, "BLE Disconnected. Sending disarm and zero throttle command.");
-        flight_command_t failsafe_cmd;
-        failsafe_cmd.throttle = 0.0f;
-        failsafe_cmd.pitch = 0.0f;
-        failsafe_cmd.roll = 0.0f;
-        failsafe_cmd.yaw = 0.0f;
-        failsafe_cmd.arm_status = false; // Disarm
-
-        if (command_queue != NULL)
-        {
-            if (xQueueSend(command_queue, &failsafe_cmd, pdMS_TO_TICKS(10)) != pdPASS)
-            {
-                ESP_LOGE(TAG, "Failed to send failsafe command to queue on disconnect");
-            }
-            else
-            {
-                ESP_LOGD(TAG, "Sent failsafe (disarm, zero throttle) to command_queue");
-            }
-        }
-        else
-        {
-            ESP_LOGE(TAG, "Command queue is NULL! Cannot send failsafe on disconnect.");
-        }
+        // Failsafe: reduce collective to 0 quickly
+        motor_adjust_power(-1000);
 
         // Restart advertising
         app_advertise();
@@ -313,13 +294,18 @@ static void app_gatt_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
         ESP_LOGD(TAG, "registering characteristic %s with def_handle=0x%x val_handle=0x%x",
                  ble_uuid_to_str(ctxt->chr.chr_def->uuid, buf),
                  ctxt->chr.def_handle, ctxt->chr.val_handle);
-        // drone_char_handle is now assigned directly via .val_handle in gatt_svcs
+        // Characteristic handles are also assigned directly via .val_handle in gatt_svcs.
         // This callback can still be used for logging or other actions if needed.
         // If .val_handle in gatt_svcs isn't working as expected, this is where you'd assign it:
         if (ble_uuid_cmp(ctxt->chr.chr_def->uuid, &DRONE_CHARACTERISTIC_UUID128.u) == 0)
         {
-            drone_char_handle = ctxt->chr.val_handle;
-            ESP_LOGI(TAG, "Drone characteristic registered via callback, val_handle=0x%x", drone_char_handle);
+            command_char_handle = ctxt->chr.val_handle;
+            ESP_LOGI(TAG, "Command characteristic registered, val_handle=0x%x", command_char_handle);
+        }
+        else if (ble_uuid_cmp(ctxt->chr.chr_def->uuid, &TELEMETRY_CHARACTERISTIC_UUID128.u) == 0)
+        {
+            telemetry_char_handle = ctxt->chr.val_handle;
+            ESP_LOGI(TAG, "Telemetry characteristic registered, val_handle=0x%x", telemetry_char_handle);
         }
         break;
 
@@ -451,9 +437,9 @@ esp_err_t send_telemetry(const void *data, size_t len)
         ESP_LOGW(TAG, "Send telemetry: No connection");
         return ESP_ERR_NOT_FOUND;
     }
-    if (drone_char_handle == 0)
+    if (telemetry_char_handle == 0)
     {
-        ESP_LOGE(TAG, "Send telemetry: Invalid drone_char_handle");
+        ESP_LOGE(TAG, "Send telemetry: Invalid telemetry_char_handle");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -463,7 +449,7 @@ esp_err_t send_telemetry(const void *data, size_t len)
         return ESP_ERR_NO_MEM;
     }
 
-    int rc = ble_gattc_notify_custom(conn_handle, drone_char_handle, om);
+    int rc = ble_gattc_notify_custom(conn_handle, telemetry_char_handle, om);
     if (rc != 0)
     {
         ESP_LOGE(TAG, "Error sending telemetry notification; rc=%d", rc);
@@ -471,4 +457,20 @@ esp_err_t send_telemetry(const void *data, size_t len)
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+// Convenience: send a single tagged log line to the app
+esp_err_t ble_log_str(const char *tag, const char *msg)
+{
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE || telemetry_char_handle == 0)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char buf[180];
+    int n = snprintf(buf, sizeof(buf), "%s: %s", tag ? tag : "LOG", msg ? msg : "");
+    if (n < 0)
+        return ESP_FAIL;
+    if ((size_t)n > sizeof(buf))
+        n = sizeof(buf);
+    return send_telemetry(buf, (size_t)n);
 }

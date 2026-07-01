@@ -35,4 +35,7 @@ void set_stabilization_enabled(bool enabled);
 // ESC control functions
 void esc_control_task(void *pvParameters);
 
+// New: power adjust entry points used by BLE opcodes
+void motor_adjust_power(int16_t delta_step_0_to_1000);
+
 #endif // MOTOR_CONTROL_H

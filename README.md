@@ -19,21 +19,15 @@ The drone communicates with a companion app (e.g., on a smartphone) using BLE.
 
 *   **Device Name:** `Pendragon`
 *   **Service UUID:** `ffeeddcc-bbaa-9988-7766-554433221100`
-*   **Characteristic UUID (for commands and telemetry):** `00ffeedd-ccbbaa-9988-7766-5544332211`
+*   **Command Characteristic UUID (write):** `00ffeedd-ccbb-aa99-8877-665544332211`
+*   **Telemetry Characteristic UUID (notify/read):** `11223344-5566-7788-99aa-bbccddeeff00`
 
-This characteristic is used for bidirectional communication:
-*   **App to Drone (Write):** The app sends commands to the drone by writing to this characteristic. The command structure is as follows:
-    ```c
-    typedef struct
-    {
-        uint8_t throttle; // 0-255 (0% to 100% power)
-        uint8_t pitch;    // 0-255 (128 is neutral, <128 backward, >128 forward)
-        uint8_t roll;     // 0-255 (128 is neutral, <128 left, >128 right)
-        uint8_t yaw;      // 0-255 (128 is neutral, <128 rotate left, >128 rotate right)
-        uint8_t mode;     // Flight mode or other custom flags
-    } ble_command_t;
-    ```
-*   **Drone to App (Notify):** The drone can send telemetry data (sensor readings, status, etc.) to the app via notifications on this same characteristic. The app must subscribe to these notifications to receive the data. (The exact structure of telemetry data can be defined here as it's implemented).
+The BLE protocol is intentionally small while the motor mapping is being tuned:
+*   **App to Drone (Write):** write `[opcode]` or `[opcode, step]` to the command characteristic.
+    *   `0xA0`: power up by `step` units.
+    *   `0xA1`: power down by `step` units.
+    *   `step` defaults to `50` when omitted or zero and is clamped in firmware to the 0-1000 motor power domain.
+*   **Drone to App (Notify):** telemetry/log lines are sent as UTF-8 notifications on the telemetry characteristic.
 
 ## Building and Flashing
 

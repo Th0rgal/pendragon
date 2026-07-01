@@ -18,8 +18,6 @@ void command_handler_task(void *pvParameters)
         .arm_status = false};
 
     uint32_t counter = 0;
-    static TickType_t last_success_time = 0;
-    static uint32_t backoff_count = 0;
 
     ESP_LOGI(TAG, "Command handler task started");
 

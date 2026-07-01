@@ -7,9 +7,9 @@
 #include <math.h>
 #include <string.h>
 
-#define ENABLE_ICM42688P_LOGGING 0     // high-level data prints (disabled)
+#define ENABLE_ICM42688P_LOGGING 1     // high-level data prints (enabled for calibration)
 #define ENABLE_ICM42688P_REG_LOGGING 0 // per-register SPI logs (noisy)
-#define LOG_THROTTLE_MS 100
+#define LOG_THROTTLE_MS 200
 static uint32_t last_log_ms = 0;
 
 static const char *TAG = "ICM42688P";
@@ -95,27 +95,6 @@ static esp_err_t icm42688p_spi_read_reg(uint8_t reg, uint8_t *data)
     ESP_LOGI(TAG, "SPI R reg 0x%02X -> 0x%02X (%s)", reg, *data, esp_err_to_name(ret));
 #endif
     return ret;
-}
-
-static esp_err_t icm42688p_spi_read_bytes(uint8_t start_reg, uint8_t *data, size_t len)
-{
-    uint8_t tx_buf[1 + len];
-    memset(tx_buf, 0, sizeof(tx_buf));
-    tx_buf[0] = start_reg | 0x80; // Read command
-
-    spi_transaction_t t = {
-        .length = sizeof(tx_buf) * 8,
-        .tx_buffer = tx_buf,
-        .rx_buffer = tx_buf, // reuse buffer
-    };
-
-    esp_err_t ret = spi_device_polling_transmit(icm_spi, &t);
-    if (ret != ESP_OK)
-        return ret;
-
-    // First byte in rx is dummy (address phase)
-    memcpy(data, &tx_buf[1], len);
-    return ESP_OK;
 }
 
 // ===== Driver public API =====
@@ -314,9 +293,18 @@ esp_err_t icm42688p_read_data(icm42688p_data_t *out)
     out->accel_z = ((float)accel_z_raw) / ACCEL_SENS_ACTUAL;
 
     // Convert gyroscope data using ±2000dps sensitivity
-    out->gyro_x = ((float)gyro_x_raw) / GYRO_SENS_2000DPS;
-    out->gyro_y = ((float)gyro_y_raw) / GYRO_SENS_2000DPS;
-    out->gyro_z = ((float)gyro_z_raw) / GYRO_SENS_2000DPS;
+    float gx = ((float)gyro_x_raw) / GYRO_SENS_2000DPS;
+    float gy = ((float)gyro_y_raw) / GYRO_SENS_2000DPS;
+    float gz = ((float)gyro_z_raw) / GYRO_SENS_2000DPS;
+
+    // Apply hardcoded gyro bias compensation (user-provided)
+    const float GYRO_BIAS_X = 1.1f;
+    const float GYRO_BIAS_Y = 1.1f;
+    const float GYRO_BIAS_Z = 1.8f;
+
+    out->gyro_x = gx - GYRO_BIAS_X;
+    out->gyro_y = gy - GYRO_BIAS_Y;
+    out->gyro_z = gz - GYRO_BIAS_Z;
     out->timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
 #if ENABLE_ICM42688P_LOGGING
@@ -324,7 +312,7 @@ esp_err_t icm42688p_read_data(icm42688p_data_t *out)
     if (now_ms - last_log_ms >= LOG_THROTTLE_MS)
     {
         last_log_ms = now_ms;
-        ESP_LOGI(TAG, "Accel[g] (%.2f, %.2f, %.2f) Gyro[dps] (%.2f, %.2f, %.2f) Temp %.2f C",
+        ESP_LOGI(TAG, "ICM CAL ax=%.3f ay=%.3f az=%.3f gx=%.1f gy=%.1f gz=%.1f temp=%.1fC",
                  out->accel_x, out->accel_y, out->accel_z,
                  out->gyro_x, out->gyro_y, out->gyro_z,
                  out->temperature);
