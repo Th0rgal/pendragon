@@ -11,6 +11,7 @@ idf_component_register(
         driver
         esp_timer
         nvs_flash
+        app_update
         bt
         led_strip
 )

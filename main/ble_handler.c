@@ -10,6 +10,11 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "ble_handler.h"
 #include "motor_control.h"
 
@@ -21,6 +26,12 @@ static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
 // BLE characteristic handles - to be assigned in app_gatt_register_cb
 static uint16_t command_char_handle = 0;
 static uint16_t telemetry_char_handle = 0;
+static esp_ota_handle_t ota_handle = 0;
+static const esp_partition_t *ota_partition = NULL;
+static size_t ota_expected_size = 0;
+static size_t ota_received_size = 0;
+static uint16_t ota_expected_seq = 0;
+static bool ota_in_progress = false;
 
 // BLE Address information
 static uint8_t own_addr_type;
@@ -32,6 +43,8 @@ static int app_gap_event_handler(struct ble_gap_event *event, void *arg);
 static void app_gatt_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg);
 static void ble_on_reset(int reason); // Renamed from ble_hs_reset_cb for consistency
 static void app_on_sync(void);
+static int handle_command_payload(const uint8_t *payload, uint16_t len);
+static void delayed_restart_task(void *pvParameters);
 
 // BLE service UUIDs (128-bit)
 static const ble_uuid128_t DRONE_SERVICE_UUID128 = {
@@ -57,39 +70,25 @@ static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
         return 0;
 
     case BLE_GATT_ACCESS_OP_WRITE_CHR:
-        // Handle write request: opcode-based protocol
-        if (ctxt->om->om_len >= 1)
+        if (ctxt->om->om_len < 1)
         {
-            const uint8_t *payload = ctxt->om->om_data;
-            uint8_t opcode = payload[0];
-            if (opcode >= PENDRAGON_BLE_OPCODE_MIN)
-            {
-                uint16_t step = PENDRAGON_BLE_DEFAULT_POWER_STEP;
-                if (ctxt->om->om_len >= 2)
-                {
-                    step = payload[1];
-                    // map 0..255 => 0..255 for now; allow >255 later via 2 bytes if needed
-                    if (step == 0)
-                        step = PENDRAGON_BLE_DEFAULT_POWER_STEP;
-                }
-                switch ((pendragon_ble_opcode_t)opcode)
-                {
-                case PENDRAGON_BLE_CMD_POWER_UP:
-                    ESP_LOGI(TAG, "BLE: POWER_UP step=%u", step);
-                    motor_adjust_power(step);
-                    return 0;
-                case PENDRAGON_BLE_CMD_POWER_DOWN:
-                    ESP_LOGI(TAG, "BLE: POWER_DOWN step=%u", step);
-                    motor_adjust_power(-(int16_t)step);
-                    return 0;
-                default:
-                    ESP_LOGW(TAG, "BLE: Unknown opcode 0x%02X", opcode);
-                    return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
-                }
-            }
+            ESP_LOGW(TAG, "GATT Write: empty payload");
+            return BLE_ATT_ERR_UNLIKELY;
         }
-        ESP_LOGW(TAG, "GATT Write: Unsupported payload length=%d", ctxt->om->om_len);
-        return BLE_ATT_ERR_UNLIKELY;
+
+        uint8_t payload[512];
+        if (ctxt->om->om_len > sizeof(payload))
+        {
+            ESP_LOGW(TAG, "GATT Write too large: %d", ctxt->om->om_len);
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        int rc = os_mbuf_copydata(ctxt->om, 0, ctxt->om->om_len, payload);
+        if (rc != 0)
+        {
+            ESP_LOGE(TAG, "Failed to copy GATT write payload: rc=%d", rc);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return handle_command_payload(payload, ctxt->om->om_len);
 
     default:
         return BLE_ATT_ERR_UNLIKELY;
@@ -123,6 +122,259 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
         0, // No more services
     },
 };
+
+static uint32_t read_le_u32(const uint8_t *bytes)
+{
+    return ((uint32_t)bytes[0]) |
+           ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) |
+           ((uint32_t)bytes[3] << 24);
+}
+
+static uint16_t read_le_u16(const uint8_t *bytes)
+{
+    return ((uint16_t)bytes[0]) | ((uint16_t)bytes[1] << 8);
+}
+
+static void send_info_telemetry(const char *prefix)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+
+    char message[180];
+    snprintf(message, sizeof(message),
+             "%s name=%s version=%s running=%s next=%s heap=%lu ota=%u/%u",
+             prefix,
+             app ? app->project_name : "unknown",
+             app ? app->version : "unknown",
+             running ? running->label : "none",
+             next ? next->label : "none",
+             esp_get_free_heap_size(),
+             (unsigned)ota_received_size,
+             (unsigned)ota_expected_size);
+    ble_log_str("DBG", message);
+}
+
+static void reset_ota_state(void)
+{
+    ota_handle = 0;
+    ota_partition = NULL;
+    ota_expected_size = 0;
+    ota_received_size = 0;
+    ota_expected_seq = 0;
+    ota_in_progress = false;
+}
+
+static int handle_ota_begin(const uint8_t *payload, uint16_t len)
+{
+    if (len != PENDRAGON_BLE_OTA_BEGIN_LEN)
+    {
+        ble_log_str("OTA", "begin rejected: expected 5-byte payload");
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (ota_in_progress)
+    {
+        ble_log_str("OTA", "begin rejected: OTA already in progress");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    uint32_t firmware_size = read_le_u32(&payload[1]);
+    ota_partition = esp_ota_get_next_update_partition(NULL);
+    if (ota_partition == NULL)
+    {
+        ble_log_str("OTA", "begin failed: no update partition");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (firmware_size == 0 || firmware_size > ota_partition->size)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "begin rejected: size=%lu partition=%lu",
+                 firmware_size, ota_partition->size);
+        ble_log_str("OTA", message);
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    motor_adjust_power(-1000);
+    esp_err_t ret = esp_ota_begin(ota_partition, firmware_size, &ota_handle);
+    if (ret != ESP_OK)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "begin failed: %s", esp_err_to_name(ret));
+        ble_log_str("OTA", message);
+        reset_ota_state();
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    ota_expected_size = firmware_size;
+    ota_received_size = 0;
+    ota_expected_seq = 0;
+    ota_in_progress = true;
+
+    char message[120];
+    snprintf(message, sizeof(message), "begin ok partition=%s size=%lu",
+             ota_partition->label, firmware_size);
+    ble_log_str("OTA", message);
+    return 0;
+}
+
+static int handle_ota_data(const uint8_t *payload, uint16_t len)
+{
+    if (!ota_in_progress || ota_handle == 0)
+    {
+        ble_log_str("OTA", "data rejected: no OTA in progress");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (len <= PENDRAGON_BLE_OTA_DATA_HEADER_LEN)
+    {
+        ble_log_str("OTA", "data rejected: empty chunk");
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    uint16_t seq = read_le_u16(&payload[1]);
+    if (seq != ota_expected_seq)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "data rejected: seq=%u expected=%u",
+                 seq, ota_expected_seq);
+        ble_log_str("OTA", message);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    const uint8_t *chunk = &payload[PENDRAGON_BLE_OTA_DATA_HEADER_LEN];
+    size_t chunk_len = len - PENDRAGON_BLE_OTA_DATA_HEADER_LEN;
+    if (ota_received_size + chunk_len > ota_expected_size)
+    {
+        ble_log_str("OTA", "data rejected: would exceed image size");
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    esp_err_t ret = esp_ota_write(ota_handle, chunk, chunk_len);
+    if (ret != ESP_OK)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "write failed: %s", esp_err_to_name(ret));
+        ble_log_str("OTA", message);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    ota_received_size += chunk_len;
+    ota_expected_seq++;
+
+    if ((ota_expected_seq % 32) == 0 || ota_received_size == ota_expected_size)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "progress %u/%u seq=%u",
+                 (unsigned)ota_received_size, (unsigned)ota_expected_size,
+                 ota_expected_seq);
+        ble_log_str("OTA", message);
+    }
+    return 0;
+}
+
+static int handle_ota_end(void)
+{
+    if (!ota_in_progress || ota_handle == 0)
+    {
+        ble_log_str("OTA", "end rejected: no OTA in progress");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (ota_received_size != ota_expected_size)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "end rejected: received=%u expected=%u",
+                 (unsigned)ota_received_size, (unsigned)ota_expected_size);
+        ble_log_str("OTA", message);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    esp_err_t ret = esp_ota_end(ota_handle);
+    if (ret != ESP_OK)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "end failed: %s", esp_err_to_name(ret));
+        ble_log_str("OTA", message);
+        reset_ota_state();
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    ret = esp_ota_set_boot_partition(ota_partition);
+    if (ret != ESP_OK)
+    {
+        char message[120];
+        snprintf(message, sizeof(message), "set boot failed: %s", esp_err_to_name(ret));
+        ble_log_str("OTA", message);
+        reset_ota_state();
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    ble_log_str("OTA", "complete; rebooting into new firmware");
+    reset_ota_state();
+    xTaskCreate(delayed_restart_task, "ble_ota_restart", 2048, NULL, 5, NULL);
+    return 0;
+}
+
+static int handle_ota_abort(void)
+{
+    if (ota_in_progress && ota_handle != 0)
+    {
+        esp_ota_abort(ota_handle);
+    }
+    reset_ota_state();
+    ble_log_str("OTA", "aborted");
+    return 0;
+}
+
+static int handle_command_payload(const uint8_t *payload, uint16_t len)
+{
+    uint8_t opcode = payload[0];
+    if (opcode < PENDRAGON_BLE_OPCODE_MIN)
+    {
+        ESP_LOGW(TAG, "BLE: Unsupported opcode 0x%02X", opcode);
+        return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+    }
+
+    switch ((pendragon_ble_opcode_t)opcode)
+    {
+    case PENDRAGON_BLE_CMD_POWER_UP:
+    case PENDRAGON_BLE_CMD_POWER_DOWN:
+    {
+        uint16_t step = PENDRAGON_BLE_DEFAULT_POWER_STEP;
+        if (len >= 2)
+        {
+            step = payload[1] == 0 ? PENDRAGON_BLE_DEFAULT_POWER_STEP : payload[1];
+        }
+        ESP_LOGI(TAG, "BLE: %s step=%u",
+                 opcode == PENDRAGON_BLE_CMD_POWER_UP ? "POWER_UP" : "POWER_DOWN",
+                 step);
+        motor_adjust_power(opcode == PENDRAGON_BLE_CMD_POWER_UP ? step : -(int16_t)step);
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_PING:
+        ble_log_str("DBG", "pong");
+        return 0;
+    case PENDRAGON_BLE_CMD_INFO:
+        send_info_telemetry("info");
+        return 0;
+    case PENDRAGON_BLE_CMD_OTA_BEGIN:
+        return handle_ota_begin(payload, len);
+    case PENDRAGON_BLE_CMD_OTA_DATA:
+        return handle_ota_data(payload, len);
+    case PENDRAGON_BLE_CMD_OTA_END:
+        return handle_ota_end();
+    case PENDRAGON_BLE_CMD_OTA_ABORT:
+        return handle_ota_abort();
+    default:
+        ESP_LOGW(TAG, "BLE: Unknown opcode 0x%02X", opcode);
+        return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+    }
+}
+
+static void delayed_restart_task(void *pvParameters)
+{
+    vTaskDelay(pdMS_TO_TICKS(700));
+    esp_restart();
+}
 
 // BLE GAP event callback
 static int app_gap_event_handler(struct ble_gap_event *event, void *arg)
