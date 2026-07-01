@@ -201,16 +201,9 @@ void set_motor_speed(motor_id_t motor, uint16_t speed)
         speed = 1000;
     }
 
-    // Map 0-1000 to ESC range (1000-2000µs)
-    uint32_t pulse_us;
-    if (speed == 0)
-    {
-        pulse_us = MIN_THROTTLE_PULSE_US; // Min throttle/off
-    }
-    else
-    {
-        pulse_us = MIN_THROTTLE_PULSE_US + speed; // 1000 + speed → 1000-2000µs range
-    }
+    // Map 0 to no PWM pulse, and 1-1000 to the ESC range (1001-2000µs).
+    // A real zero avoids leaving ESCs/motors audibly driven after a stop.
+    uint32_t pulse_us = speed == 0 ? 0 : MIN_THROTTLE_PULSE_US + speed;
 
     // Convert to duty cycle
     uint32_t duty = pulse_us_to_duty(pulse_us);
@@ -431,6 +424,8 @@ void esc_control_task(void *pvParameters)
 // ===== New public entry points used by BLE opcodes =====
 void motor_adjust_power(int16_t delta_step_0_to_1000)
 {
+    bool hard_stop = false;
+
     portENTER_CRITICAL(&motor_state_mux);
     int32_t updated = (int32_t)commanded_collective + (int32_t)delta_step_0_to_1000;
     if (updated < 0)
@@ -438,10 +433,22 @@ void motor_adjust_power(int16_t delta_step_0_to_1000)
     if (updated > 1000)
         updated = 1000;
     commanded_collective = (uint16_t)updated;
+    hard_stop = delta_step_0_to_1000 < 0 && updated == 0;
+    if (hard_stop)
+    {
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            current_motor_speeds[i] = 0;
+        }
+    }
 #if ENABLE_LOGGING
     uint16_t collective_snapshot = commanded_collective;
 #endif
     portEXIT_CRITICAL(&motor_state_mux);
+    if (hard_stop)
+    {
+        set_motor_speed(MOTOR_ALL, 0);
+    }
 #if ENABLE_LOGGING
     ESP_LOGI(TAG, "collective updated to %u via BLE adjust", collective_snapshot);
 #endif
