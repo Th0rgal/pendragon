@@ -9,6 +9,7 @@
 #include "command_handler.h"  // For flight_command_t
 #include "icm42688p_sensor.h" // For IMU data
 #include "motor_mapping.h"    // For readable influence mapping
+#include <stdio.h>
 
 // Queue handles declared in main.c
 extern QueueHandle_t command_queue;
@@ -70,6 +71,22 @@ static uint16_t current_motor_speeds[MOTOR_COUNT] = {0, 0, 0, 0}; // Current spe
 static bool stabilization_enabled = true;
 static uint16_t commanded_collective = 0; // 0..1000 collective power target
 static portMUX_TYPE motor_state_mux = portMUX_INITIALIZER_UNLOCKED;
+static esp_err_t motor_timer_config_status = ESP_ERR_INVALID_STATE;
+static esp_err_t motor_channel_config_status[MOTOR_COUNT] = {
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE};
+static esp_err_t motor_last_set_duty_status[MOTOR_COUNT] = {
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE};
+static esp_err_t motor_last_update_duty_status[MOTOR_COUNT] = {
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE,
+    ESP_ERR_INVALID_STATE};
 
 // Calculate PWM duty cycle from pulse width in microseconds
 static uint32_t pulse_us_to_duty(uint32_t pulse_us)
@@ -143,7 +160,11 @@ void init_motors(void)
         .duty_resolution = PWM_RESOLUTION,
         .freq_hz = PWM_FREQUENCY,
         .clk_cfg = LEDC_USE_APB_CLK};
-    ledc_timer_config(&timer_conf);
+    motor_timer_config_status = ledc_timer_config(&timer_conf);
+    if (motor_timer_config_status != ESP_OK)
+    {
+        ESP_LOGE(TAG, "LEDC timer config failed: %s", esp_err_to_name(motor_timer_config_status));
+    }
 
     // Configure all motor channels
     for (int i = 0; i < MOTOR_COUNT; i++)
@@ -155,7 +176,12 @@ void init_motors(void)
             .speed_mode = PWM_MODE,
             .hpoint = 0,
             .timer_sel = PWM_TIMER};
-        ledc_channel_config(&channel_conf);
+        motor_channel_config_status[i] = ledc_channel_config(&channel_conf);
+        if (motor_channel_config_status[i] != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Motor %d LEDC channel config failed on GPIO%d: %s",
+                     i, MOTOR_PINS[i], esp_err_to_name(motor_channel_config_status[i]));
+        }
 
 #if ENABLE_LOGGING
         ESP_LOGI(TAG, "Motor %d initialized on GPIO%d (channel %d)", i, MOTOR_PINS[i], MOTOR_CHANNELS[i]);
@@ -194,8 +220,8 @@ void set_motor_speed(motor_id_t motor, uint16_t speed)
         // Set all motors to the same speed
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
-            ledc_set_duty(PWM_MODE, MOTOR_CHANNELS[i], duty);
-            ledc_update_duty(PWM_MODE, MOTOR_CHANNELS[i]);
+            motor_last_set_duty_status[i] = ledc_set_duty(PWM_MODE, MOTOR_CHANNELS[i], duty);
+            motor_last_update_duty_status[i] = ledc_update_duty(PWM_MODE, MOTOR_CHANNELS[i]);
             current_motor_speeds[i] = speed;
         }
 
@@ -207,8 +233,8 @@ void set_motor_speed(motor_id_t motor, uint16_t speed)
     else if (motor < MOTOR_COUNT)
     {
         // Set specific motor
-        ledc_set_duty(PWM_MODE, MOTOR_CHANNELS[motor], duty);
-        ledc_update_duty(PWM_MODE, MOTOR_CHANNELS[motor]);
+        motor_last_set_duty_status[motor] = ledc_set_duty(PWM_MODE, MOTOR_CHANNELS[motor], duty);
+        motor_last_update_duty_status[motor] = ledc_update_duty(PWM_MODE, MOTOR_CHANNELS[motor]);
         current_motor_speeds[motor] = speed;
 
 #if ENABLE_LOGGING
@@ -419,4 +445,32 @@ void motor_adjust_power(int16_t delta_step_0_to_1000)
 #if ENABLE_LOGGING
     ESP_LOGI(TAG, "collective updated to %u via BLE adjust", collective_snapshot);
 #endif
+}
+
+void motor_get_debug_status(char *buffer, size_t buffer_len)
+{
+    if (!buffer || buffer_len == 0)
+        return;
+
+    uint16_t collective_snapshot;
+    portENTER_CRITICAL(&motor_state_mux);
+    collective_snapshot = commanded_collective;
+    portEXIT_CRITICAL(&motor_state_mux);
+
+    snprintf(buffer, buffer_len,
+             "motor collective=%u timer=%s ch=[%s,%s,%s,%s] duty=[%s,%s,%s,%s] upd=[%s,%s,%s,%s]",
+             collective_snapshot,
+             esp_err_to_name(motor_timer_config_status),
+             esp_err_to_name(motor_channel_config_status[0]),
+             esp_err_to_name(motor_channel_config_status[1]),
+             esp_err_to_name(motor_channel_config_status[2]),
+             esp_err_to_name(motor_channel_config_status[3]),
+             esp_err_to_name(motor_last_set_duty_status[0]),
+             esp_err_to_name(motor_last_set_duty_status[1]),
+             esp_err_to_name(motor_last_set_duty_status[2]),
+             esp_err_to_name(motor_last_set_duty_status[3]),
+             esp_err_to_name(motor_last_update_duty_status[0]),
+             esp_err_to_name(motor_last_update_duty_status[1]),
+             esp_err_to_name(motor_last_update_duty_status[2]),
+             esp_err_to_name(motor_last_update_duty_status[3]));
 }

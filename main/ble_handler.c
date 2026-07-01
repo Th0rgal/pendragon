@@ -178,6 +178,13 @@ static void send_sensor_telemetry(void)
     ble_log_str("DBG", message);
 }
 
+static void send_motor_telemetry(void)
+{
+    char message[240];
+    motor_get_debug_status(message, sizeof(message));
+    ble_log_str("DBG", message);
+}
+
 static void reset_ota_state(void)
 {
     ota_handle = 0;
@@ -380,6 +387,9 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
         return 0;
     case PENDRAGON_BLE_CMD_SENSOR_SNAPSHOT:
         send_sensor_telemetry();
+        return 0;
+    case PENDRAGON_BLE_CMD_MOTOR_STATUS:
+        send_motor_telemetry();
         return 0;
     case PENDRAGON_BLE_CMD_OTA_BEGIN:
         return handle_ota_begin(payload, len);

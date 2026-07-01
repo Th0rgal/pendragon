@@ -2,6 +2,7 @@
 #define MOTOR_CONTROL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
@@ -37,5 +38,6 @@ void esc_control_task(void *pvParameters);
 
 // New: power adjust entry points used by BLE opcodes
 void motor_adjust_power(int16_t delta_step_0_to_1000);
+void motor_get_debug_status(char *buffer, size_t buffer_len);
 
 #endif // MOTOR_CONTROL_H
