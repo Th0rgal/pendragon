@@ -4,17 +4,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "host/ble_uuid.h"
-
-// New: Tiny protocol for power control via BLE writes
-// Payload formats supported by the characteristic write handler:
-//  - 1 byte: opcode only
-//  - 2 bytes: opcode, step_units (0-1000 mapped in motor domain). Typical step: 25..100
-// Opcodes below chosen in 0xA0+ range to avoid collision with ASCII
-typedef enum
-{
-    BLE_CMD_POWER_UP = 0xA0,
-    BLE_CMD_POWER_DOWN = 0xA1
-} ble_cmd_opcode_t;
+#include "ble_protocol.h"
 
 // Initialize BLE
 esp_err_t init_ble(void);

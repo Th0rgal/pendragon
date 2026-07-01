@@ -36,18 +36,15 @@ static void app_on_sync(void);
 // BLE service UUIDs (128-bit)
 static const ble_uuid128_t DRONE_SERVICE_UUID128 = {
     .u = {.type = BLE_UUID_TYPE_128},
-    .value = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-              0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}};
+    .value = PENDRAGON_SERVICE_UUID_BYTES};
 
 static const ble_uuid128_t DRONE_CHARACTERISTIC_UUID128 = {
     .u = {.type = BLE_UUID_TYPE_128},
-    .value = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-              0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00}};
+    .value = PENDRAGON_COMMAND_CHARACTERISTIC_UUID_BYTES};
 
 static const ble_uuid128_t TELEMETRY_CHARACTERISTIC_UUID128 = {
     .u = {.type = BLE_UUID_TYPE_128},
-    .value = {0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99,
-              0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11}};
+    .value = PENDRAGON_TELEMETRY_CHARACTERISTIC_UUID_BYTES};
 
 // BLE GAP access callback
 static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
@@ -65,23 +62,23 @@ static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
         {
             const uint8_t *payload = ctxt->om->om_data;
             uint8_t opcode = payload[0];
-            if (opcode >= 0xA0)
+            if (opcode >= PENDRAGON_BLE_OPCODE_MIN)
             {
-                uint16_t step = 50; // default step in 0..1000 domain
+                uint16_t step = PENDRAGON_BLE_DEFAULT_POWER_STEP;
                 if (ctxt->om->om_len >= 2)
                 {
                     step = payload[1];
                     // map 0..255 => 0..255 for now; allow >255 later via 2 bytes if needed
                     if (step == 0)
-                        step = 50;
+                        step = PENDRAGON_BLE_DEFAULT_POWER_STEP;
                 }
-                switch ((ble_cmd_opcode_t)opcode)
+                switch ((pendragon_ble_opcode_t)opcode)
                 {
-                case BLE_CMD_POWER_UP:
+                case PENDRAGON_BLE_CMD_POWER_UP:
                     ESP_LOGI(TAG, "BLE: POWER_UP step=%u", step);
                     motor_adjust_power(step);
                     return 0;
-                case BLE_CMD_POWER_DOWN:
+                case PENDRAGON_BLE_CMD_POWER_DOWN:
                     ESP_LOGI(TAG, "BLE: POWER_DOWN step=%u", step);
                     motor_adjust_power(-(int16_t)step);
                     return 0;
@@ -364,7 +361,7 @@ esp_err_t init_ble(void)
 
     // Initialize NimBLE GAP service
     ble_svc_gap_init();
-    rc = ble_svc_gap_device_name_set("Pendragon");
+    rc = ble_svc_gap_device_name_set(PENDRAGON_BLE_DEVICE_NAME);
     if (rc != 0)
     {
         ESP_LOGE(TAG, "Failed to set device name; rc=%d", rc);
