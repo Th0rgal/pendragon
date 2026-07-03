@@ -3,34 +3,25 @@
 Living document for the physical build. Keep this in sync when wiring changes.
 Last updated: 2026-07-03 (bench findings from BLE motor/ESC test sessions).
 
-## Current status (2026-07-03, evening)
+## Current status (2026-07-03, night)
 
-- Drone runs firmware `c9aa032` in **PWM flight mode**, verified end-to-end:
-  trims applied in the mix, slow spin + hard stop clean, event log and
-  telemetry streaming working. Legacy accel-P stabilization is active and
-  visibly correcting (±15 units at collective 310).
-- ESC spin directions configured for quad-X (TR+BL CCW, TL+BR CW), saved in
-  the ESCs.
-- **Thrust trims calibrated and saved**: `[TR=150, BR=50, TL=79, BL=110]`.
-  They SATURATED both clamps — measured thrust spread was 4.4:1
-  (TR 8.4mg vs BR 37.3mg median tilt), beyond what trim can equalize.
-  TOP RIGHT inspection is mandatory before hover; recalibrate after any
-  prop/motor work (`uv run tools/esc_tool.py calibrate` in DShot mode).
-- Bench caution: with these trims, collective ≥400 kicks briefly rocked the
-  frame off the ground (gyro >100dps transient). Keep bench tests ≤350.
-- **Blocked on hardware**: (1) undersized 5V buck causes brownout resets under
-  BLE+flash load on battery-only power — must be fixed before flight (USB
-  power avoids it on the bench); (2) props need rearranging and the TOP RIGHT
-  corner needs inspection; (3) no battery voltage sensing yet.
-- Next software milestone: IMU→frame axis mapping — tooling ready
-  (`tools/axis_map.py`, uses the new per-motor throttle opcode 0xD6 with a
-  motor-liveness gate); needs one battery power-cycle to re-arm the ESC, then
-  a ~2min run. After that: stabilization (attitude estimation → rate/angle
-  PID) for a stable hover just above ground.
-- Prop swap reminder: EXCHANGE the BR and BL props between motors,
-  right-side-up (do NOT flip a prop upside-down — that ruins the airfoil, it
-  does not change handedness). Afterwards: set BR=normal, BL=reversed, then
-  recalibrate trims and re-run the yaw-balance check.
+- **Props are in the final flight arrangement**: owner swapped BR<->BL
+  (identified by measurement — config-flatness test, tools/swap_id logic:
+  the BR<->BL hypothesis ran 2.7-3.7x flatter than alternatives). Prop map:
+  TR+BL = CCW, TL+BR = CW. ESCs set to match (TR+BL reversed, TL+BR normal);
+  every prop thrusts up, torques cancel.
+- Drone runs firmware `379f8fb` in **DShot config mode** with the new
+  **silent-by-default output**: motor lines emit nothing until armed via
+  `0xD7 0x01`, and output is cut on BLE disconnect (see safety incident in
+  the protocols section). At battery-on the ESC will beep "no signal"
+  periodically — normal and harmless; motors cannot spin.
+- Trims recalibrated on the final props and deliberately SOFTENED to
+  `[TR=71, BR=71, TL=92, BL=122]` (raw calibration said [50,50,85,150] but
+  tilt magnitudes are stance-noisy; keep trims a soft prior for the PID).
+- Remaining before hover: (1) IMU→frame axis mapping (`tools/axis_map.py`,
+  ~2min, needs still drone + battery); (2) stabilization implementation;
+  (3) hardware: 5V buck fix (hard blocker — brownouts on battery-only load),
+  battery voltage sensing mod.
 
 ## Core components
 
