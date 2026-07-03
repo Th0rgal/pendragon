@@ -80,6 +80,13 @@ Stabilization code must account for both.
   (namespace `pendragon`), toggled over BLE opcode `0xD0` + reboot.
 - The ESC detects its input protocol **only at ESC power-up** — after switching
   modes the battery must be unplugged/replugged, an ESP32 reboot is not enough.
+- **SAFETY INCIDENT (2026-07-03) + fix**: with the firmware streaming DShot
+  zero-frames continuously from boot, the ESC once mis-detected the pulse
+  train (likely as Multishot - DShot's 2.5-5us pulses overlap its range) and
+  slow-spun all motors despite commanded zero. Fix: **motor lines are silent
+  by default**; DShot output must be armed via opcode `0xD7 0x01` and is cut
+  on BLE disconnect. A signal-less ESC disarms and cannot creep. Tools arm
+  automatically; the boot state is always OFF.
 - **After any ESP32 reboot (e.g. OTA) the ESC may silently stop responding**
   to DShot until a battery power-cycle: re-detection on signal resume is
   unreliable (observed both working and failing on the same day). Before any
@@ -166,6 +173,8 @@ Service `ffeeddcc-bbaa-9988-7766-554433221100`, command char (write)
 | `0xD2` | `[lo, hi]` | raw DShot test throttle 0 / 48-2047 (DShot mode) |
 | `0xD3` | `[motor, lo, hi]` | direction probe: pulse motor, report gz/accel deltas |
 | `0xD4` | `[tr, br, tl, bl]` | per-motor thrust trim % (50-150, 0/0xFF keep; empty = report) |
+| `0xD7` | `[0\|1]` | DShot output off/on (boot=OFF, cut on BLE disconnect) |
+| `0xD5` | `[motor, cmd]` | raw DShot command to one motor (1-5 = beeps) |
 
 Client tooling: `tools/esc_tool.py` (Python/bleak, run with `uv run`) — OTA,
 motor tests with IMU monitoring, direction config/probes, trims, telemetry

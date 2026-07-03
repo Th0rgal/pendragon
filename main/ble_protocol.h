@@ -52,7 +52,11 @@ typedef enum
     // Send a raw DShot command (1-47, e.g. 1-5 = beacon beeps) to one motor.
     PENDRAGON_BLE_CMD_ESC_RAW_CMD = 0xD5,      // [motor, cmd]
     // Set one motor's raw DShot throttle (0 stop, 48..cap). DShot mode only.
-    PENDRAGON_BLE_CMD_ESC_MOTOR_THROTTLE = 0xD6 // [motor, lo, hi]
+    PENDRAGON_BLE_CMD_ESC_MOTOR_THROTTLE = 0xD6, // [motor, lo, hi]
+    // Enable/disable DShot signal output. Boot default is OFF (lines silent,
+    // ESC disarmed); output is cut on BLE disconnect. Motor commands require
+    // output on. [0|1]
+    PENDRAGON_BLE_CMD_ESC_OUTPUT = 0xD7
 } pendragon_ble_opcode_t;
 
 #define PENDRAGON_BLE_OPCODE_MIN 0xA0

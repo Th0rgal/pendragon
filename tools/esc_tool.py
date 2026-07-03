@@ -25,6 +25,8 @@ Usage:
                                      write compensating trims (for PWM mode)
   esc_tool.py trim [tr br tl bl]     get/set per-motor thrust trim % (50-150)
   esc_tool.py rawcmd <motor> <cmd>   DShot mode: raw ESC command (1-5=beeps)
+  esc_tool.py output <0|1>           DShot mode: motor signal off/on (boot=off;
+                                     off = lines silent, ESC disarms)
 
 Motor order: 0=TOP RIGHT, 1=BOTTOM RIGHT, 2=TOP LEFT, 3=BOTTOM LEFT.
 See HARDWARE.md for the full protocol and bench findings.
@@ -58,6 +60,7 @@ OP_TELEMETRY_STREAM = 0xB4
 OP_EVENT_LOG = 0xB5
 OP_MOTOR_TRIM = 0xD4
 OP_ESC_RAW_CMD = 0xD5
+OP_ESC_OUTPUT = 0xD7
 
 MOTOR_NAMES = ["TOP RIGHT", "BOTTOM RIGHT", "TOP LEFT", "BOTTOM LEFT"]
 
@@ -106,6 +109,16 @@ async def connect():
 
 async def write(client, payload, response=True):
     await client.write_gatt_char(COMMAND_CHAR, bytes(payload), response=response)
+
+
+async def ensure_output(client):
+    """Arm the DShot output (silent-by-default firmware). Ignore failures on
+    older firmware that lacks the opcode."""
+    try:
+        await write(client, [OP_ESC_OUTPUT, 1])
+        await asyncio.sleep(0.4)
+    except Exception:
+        pass
 
 
 async def cmd_info(client):
@@ -435,21 +448,31 @@ async def main():
         elif action == "mode":
             await cmd_mode(client, int(sys.argv[2], 0))
         elif action in ("reverse", "normal"):
+            await ensure_output(client)
             await cmd_direction(client, int(sys.argv[2], 0), action == "reverse")
         elif action == "throttle":
+            await ensure_output(client)
             await cmd_throttle(client, int(sys.argv[2], 0))
         elif action == "spin":
+            await ensure_output(client)
             await cmd_spin(client, int(sys.argv[2], 0), float(sys.argv[3]))
+        elif action == "output":
+            await write(client, [OP_ESC_OUTPUT, int(sys.argv[2])])
+            await asyncio.sleep(0.5)
         elif action == "sensors":
             await cmd_sensors(client, float(sys.argv[2]) if len(sys.argv) > 2 else 3.0)
         elif action == "probe":
+            await ensure_output(client)
             verdict = await probe_motor(client, int(sys.argv[2]), int(sys.argv[3], 0))
             log(f"verdict: {verdict}")
         elif action == "auto":
+            await ensure_output(client)
             await cmd_auto(client)
         elif action == "calibrate":
+            await ensure_output(client)
             await cmd_calibrate(client)
         elif action == "thrustmap":
+            await ensure_output(client)
             await cmd_thrustmap(client, int(sys.argv[2]) if len(sys.argv) > 2 else 4)
         elif action == "evlog":
             await write(client, [OP_EVENT_LOG])
@@ -466,6 +489,7 @@ async def main():
                 await write(client, [OP_MOTOR_TRIM])
             await wait_telemetry("trim", timeout=5.0)
         elif action == "rawcmd":
+            await ensure_output(client)
             await write(client, [OP_ESC_RAW_CMD, int(sys.argv[2]), int(sys.argv[3])])
             await wait_telemetry("raw cmd", timeout=10.0)
         else:

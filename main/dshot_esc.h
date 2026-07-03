@@ -16,9 +16,15 @@ esp_err_t motor_mode_set_boot(uint8_t mode);
 // Whether this boot is running in DShot ESC-configuration mode.
 bool dshot_mode_active(void);
 
-// Start DShot output (zero throttle) on all motor pins and the worker task.
-// Only call when the LEDC motor driver has NOT been initialized.
+// Initialize DShot config mode (RMT channels + worker task). Motor lines
+// stay SILENT until dshot_output_set(true): a signal-less ESC disarms, so an
+// unattended drone cannot creep. Only call when LEDC is NOT initialized.
 esp_err_t dshot_config_start(void);
+
+// Enable (stream zero-throttle frames) or disable (lines low, ESC disarms
+// on signal loss) the DShot output. All motor commands require output on.
+esp_err_t dshot_output_set(bool enabled);
+bool dshot_output_enabled(void);
 
 // Queue a spin-direction change + save for the motors in `mask` (bit per
 // motor, motor_id_t order). The worker acks over BLE telemetry when done.

@@ -65,6 +65,8 @@ static rmt_encoder_handle_t dshot_copy_encoder = NULL;
 static SemaphoreHandle_t dshot_write_mutex = NULL;
 static QueueHandle_t dshot_dir_queue = NULL;
 static uint16_t dshot_current_values[DSHOT_MOTOR_COUNT] = {0};
+// Motor lines silent until explicitly enabled; a signal-less ESC disarms.
+static bool dshot_output_on = false;
 
 uint8_t motor_mode_get_boot(void)
 {
@@ -133,6 +135,10 @@ static esp_err_t dshot_write_motor(int motor, uint16_t value, bool telemetry)
     if (motor < 0 || motor >= DSHOT_MOTOR_COUNT || dshot_channels[motor] == NULL)
     {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (!dshot_output_on)
+    {
+        return ESP_ERR_INVALID_STATE;
     }
 
     rmt_symbol_word_t symbols[DSHOT_FRAME_SYMBOLS];
@@ -371,19 +377,8 @@ esp_err_t dshot_config_start(void)
     }
 
     dshot_active = true;
-
-    // Continuous zero-throttle frames let the ESC detect DShot and arm.
-    for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
-    {
-        ret = dshot_write_motor(motor, 0, false);
-        if (ret != ESP_OK)
-        {
-            ESP_LOGE(TAG, "motor %d initial frame failed: %s",
-                     motor, esp_err_to_name(ret));
-            dshot_active = false;
-            return ret;
-        }
-    }
+    // Lines stay silent until dshot_output_set(true): the ESC sees no signal
+    // and stays disarmed, so an unattended board cannot spin motors.
 
     if (xTaskCreate(dshot_worker_task, "dshot_worker", 4096, NULL, 4, NULL) != pdPASS)
     {
@@ -395,9 +390,48 @@ esp_err_t dshot_config_start(void)
     return ESP_OK;
 }
 
-esp_err_t dshot_request_direction(uint8_t mask, bool reversed)
+esp_err_t dshot_output_set(bool enabled)
 {
     if (!dshot_active)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (enabled)
+    {
+        dshot_output_on = true;
+        for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
+        {
+            esp_err_t ret = dshot_write_motor(motor, 0, false);
+            if (ret != ESP_OK)
+            {
+                dshot_output_on = false;
+                return ret;
+            }
+        }
+        ESP_LOGI(TAG, "DShot output enabled (zero throttle)");
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(dshot_write_mutex, portMAX_DELAY);
+    for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
+    {
+        rmt_disable(dshot_channels[motor]);
+        dshot_current_values[motor] = 0;
+    }
+    dshot_output_on = false;
+    xSemaphoreGive(dshot_write_mutex);
+    ESP_LOGI(TAG, "DShot output disabled (lines silent)");
+    return ESP_OK;
+}
+
+bool dshot_output_enabled(void)
+{
+    return dshot_output_on;
+}
+
+esp_err_t dshot_request_direction(uint8_t mask, bool reversed)
+{
+    if (!dshot_active || !dshot_output_on)
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -423,7 +457,7 @@ esp_err_t dshot_request_direction(uint8_t mask, bool reversed)
 
 esp_err_t dshot_request_probe(uint8_t motor, uint16_t throttle)
 {
-    if (!dshot_active)
+    if (!dshot_active || !dshot_output_on)
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -444,7 +478,7 @@ esp_err_t dshot_request_probe(uint8_t motor, uint16_t throttle)
 
 esp_err_t dshot_request_raw_command(uint8_t motor, uint8_t command)
 {
-    if (!dshot_active)
+    if (!dshot_active || !dshot_output_on)
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -517,7 +551,8 @@ void dshot_get_debug_status(char *buffer, size_t buffer_len)
         return;
     }
     snprintf(buffer, buffer_len,
-             "dshot mode active values=[%u,%u,%u,%u] (0=stop, 48-2047=throttle)",
+             "dshot mode active output=%s values=[%u,%u,%u,%u] (0=stop, 48-2047=throttle)",
+             dshot_output_on ? "on" : "OFF",
              dshot_current_values[0], dshot_current_values[1],
              dshot_current_values[2], dshot_current_values[3]);
 }

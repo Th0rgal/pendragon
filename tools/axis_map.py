@@ -53,6 +53,11 @@ async def main():
         await client.start_notify(TELEMETRY_CHAR, on_telemetry)
         await asyncio.sleep(0.3)
 
+        async def _arm(*payload):
+            await client.write_gatt_char(COMMAND_CHAR, bytes(payload), response=True)
+        await _arm(0xD7, 1)  # arm motor signal (silent-by-default firmware)
+        await asyncio.sleep(0.5)
+
         async def cmd(*payload):
             await client.write_gatt_char(COMMAND_CHAR, bytes(payload), response=True)
 

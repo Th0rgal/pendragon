@@ -383,6 +383,27 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
         }
         return 0;
     }
+    case PENDRAGON_BLE_CMD_ESC_OUTPUT:
+    {
+        if (len < 2)
+        {
+            ble_log_str("DBG", "esc output rejected: expected [0xD7, 0|1]");
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        evlog("cmd output=%u", payload[1]);
+        esp_err_t ret = dshot_output_set(payload[1] != 0);
+        if (ret != ESP_OK)
+        {
+            char message[100];
+            snprintf(message, sizeof(message), "esc output rejected: %s",
+                     esp_err_to_name(ret));
+            ble_log_str("DBG", message);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        ble_log_str("DBG", payload[1] ? "esc output ON (zero throttle)"
+                                      : "esc output OFF (lines silent)");
+        return 0;
+    }
     case PENDRAGON_BLE_CMD_ESC_MOTOR_THROTTLE:
     {
         if (len < 4)
@@ -537,10 +558,11 @@ static int app_gap_event_handler(struct ble_gap_event *event, void *arg)
         evlog("ble disconnect reason=%d, motors zeroed", event->disconnect.reason);
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
 
-        // Failsafe: reduce collective to 0 quickly
+        // Failsafe: cut motor output. In DShot mode the signal is silenced
+        // entirely - a signal-less ESC disarms and cannot creep.
         if (dshot_mode_active())
         {
-            dshot_set_test_throttle(0);
+            dshot_output_set(false);
         }
         else
         {
