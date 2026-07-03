@@ -9,9 +9,12 @@ The primary goal of this firmware is to enable flight control and telemetry via 
 ## Hardware
 
 *   **Microcontroller:** ESP32-S3 (N18R8 variant)
-*   **Sensors:** todo
-*   **Motors & ESCs:** todo
-*   **Frame & Power:** todo
+*   **Sensors:** ICM-42688-P IMU (SPI)
+*   **Motors & ESCs:** UAngel 4-in-1 45A BLHeli_S (3-6S)
+*   **Frame & Power:** ~4S LiPo → ESC "V" 15V → buck → 5V
+
+See [HARDWARE.md](HARDWARE.md) for the full wiring map, protocols, bench
+findings, and battery-monitoring plan.
 
 ## Bluetooth LE (BLE) Interface
 
@@ -22,12 +25,19 @@ The drone communicates with a companion app (e.g., on a smartphone) using BLE.
 *   **Command Characteristic UUID (write):** `00ffeedd-ccbb-aa99-8877-665544332211`
 *   **Telemetry Characteristic UUID (notify/read):** `11223344-5566-7788-99aa-bbccddeeff00`
 
-The BLE protocol is intentionally small while the motor mapping is being tuned:
-*   **App to Drone (Write):** write `[opcode]` or `[opcode, step]` to the command characteristic.
-    *   `0xA0`: power up by `step` units.
-    *   `0xA1`: power down by `step` units.
-    *   `step` defaults to `50` when omitted or zero and is clamped in firmware to the 0-1000 motor power domain.
+*   **App to Drone (Write):** write `[opcode, ...args]` to the command
+    characteristic. Opcode families: `0xA0-0xA1` collective power, `0xB0-0xB5`
+    ping/info/telemetry/debug, `0xC0-0xC4` resumable OTA updates, `0xD0-0xD5`
+    ESC configuration (DShot direction, per-motor trim, probes). Full table in
+    [HARDWARE.md](HARDWARE.md), definitions in `main/ble_protocol.h`.
 *   **Drone to App (Notify):** telemetry/log lines are sent as UTF-8 notifications on the telemetry characteristic.
+
+## Tooling
+
+`tools/esc_tool.py` (run via `uv run tools/esc_tool.py`) drives everything over
+BLE from a laptop: firmware OTA, motor tests with IMU monitoring, ESC direction
+configuration/probing, thrust trims, telemetry streaming and the firmware event
+log. `tools/motor_test.py` is a simpler PWM-mode collective ramp test.
 
 ## Building and Flashing
 
