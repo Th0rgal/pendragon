@@ -3,22 +3,28 @@
 Living document for the physical build. Keep this in sync when wiring changes.
 Last updated: 2026-07-03 (bench findings from BLE motor/ESC test sessions).
 
-## Current status (2026-07-03)
+## Current status (2026-07-03, evening)
 
-- Drone is in **DShot config mode** (NVS `motor_mode=1`, status LED dark).
-  Switch back to PWM flight mode with opcode `0xD0 0x00` + battery power-cycle.
+- Drone runs firmware `c9aa032` in **PWM flight mode**, verified end-to-end:
+  trims applied in the mix, slow spin + hard stop clean, event log and
+  telemetry streaming working. Legacy accel-P stabilization is active and
+  visibly correcting (±15 units at collective 310).
 - ESC spin directions configured for quad-X (TR+BL CCW, TL+BR CW), saved in
-  the ESCs. Firmware on the drone is one build behind this repo (it predates
-  the resumable-OTA opcode `0xC4` and the evlog stack fix — do not call `0xB5`
-  on it); flash the current build at the next opportunity, over USB if BLE
-  OTA keeps browning out.
+  the ESCs.
+- **Thrust trims calibrated and saved**: `[TR=150, BR=50, TL=79, BL=110]`.
+  They SATURATED both clamps — measured thrust spread was 4.4:1
+  (TR 8.4mg vs BR 37.3mg median tilt), beyond what trim can equalize.
+  TOP RIGHT inspection is mandatory before hover; recalibrate after any
+  prop/motor work (`uv run tools/esc_tool.py calibrate` in DShot mode).
+- Bench caution: with these trims, collective ≥400 kicks briefly rocked the
+  frame off the ground (gyro >100dps transient). Keep bench tests ≤350.
 - **Blocked on hardware**: (1) undersized 5V buck causes brownout resets under
-  BLE+flash load — must be fixed before flight; (2) props need rearranging and
-  the TOP RIGHT corner needs inspection (weak thrust, possibly damaged prop);
-  (3) no battery voltage sensing yet.
-- Next software milestone: per-motor trim calibration from thrust probes, then
-  stabilization (IMU axis calibration → attitude estimation → rate/angle PID)
-  for a stable hover just above ground.
+  BLE+flash load on battery-only power — must be fixed before flight (USB
+  power avoids it on the bench); (2) props need rearranging and the TOP RIGHT
+  corner needs inspection; (3) no battery voltage sensing yet.
+- Next software milestone: IMU→frame axis mapping (needs a cleaner dedicated
+  probe run — calibration dax/day was too noisy except BR), then stabilization
+  (attitude estimation → rate/angle PID) for a stable hover just above ground.
 
 ## Core components
 
