@@ -18,6 +18,10 @@
 #include "ble_handler.h"
 #include "motor_control.h"
 #include "icm42688p_sensor.h"
+#include "dshot_esc.h"
+#include "ble_ota.h"
+#include "evlog.h"
+#include "esp_timer.h"
 
 static const char *TAG = "BLE_HANDLER";
 
@@ -27,12 +31,6 @@ static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
 // BLE characteristic handles - to be assigned in app_gatt_register_cb
 static uint16_t command_char_handle = 0;
 static uint16_t telemetry_char_handle = 0;
-static esp_ota_handle_t ota_handle = 0;
-static const esp_partition_t *ota_partition = NULL;
-static size_t ota_expected_size = 0;
-static size_t ota_received_size = 0;
-static uint16_t ota_expected_seq = 0;
-static bool ota_in_progress = false;
 
 // BLE Address information
 static uint8_t own_addr_type;
@@ -124,14 +122,6 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
     },
 };
 
-static uint32_t read_le_u32(const uint8_t *bytes)
-{
-    return ((uint32_t)bytes[0]) |
-           ((uint32_t)bytes[1] << 8) |
-           ((uint32_t)bytes[2] << 16) |
-           ((uint32_t)bytes[3] << 24);
-}
-
 static uint16_t read_le_u16(const uint8_t *bytes)
 {
     return ((uint16_t)bytes[0]) | ((uint16_t)bytes[1] << 8);
@@ -143,18 +133,87 @@ static void send_info_telemetry(const char *prefix)
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
 
+    size_t ota_received = 0, ota_expected = 0;
+    ble_ota_get_progress(&ota_received, &ota_expected);
+
     char message[180];
     snprintf(message, sizeof(message),
-             "%s name=%s version=%s running=%s next=%s heap=%lu ota=%u/%u",
+             "%s name=%s version=%s running=%s next=%s heap=%lu ota=%u/%u "
+             "reset=%d up=%llus mode=%s",
              prefix,
              app ? app->project_name : "unknown",
              app ? app->version : "unknown",
              running ? running->label : "none",
              next ? next->label : "none",
              esp_get_free_heap_size(),
-             (unsigned)ota_received_size,
-             (unsigned)ota_expected_size);
+             (unsigned)ota_received,
+             (unsigned)ota_expected,
+             esp_reset_reason(),
+             (unsigned long long)(esp_timer_get_time() / 1000000),
+             dshot_mode_active() ? "dshot" : "pwm");
     ble_log_str("DBG", message);
+}
+
+// Dump the event log as a burst of telemetry notifications (own task: the
+// GATT callback must not block on the notify pacing delays).
+static void evlog_dump_task(void *pvParameters)
+{
+    // Static: 2.4KB is too large for the task stack (single-instance task).
+    static evlog_entry_t snapshot[EVLOG_CAPACITY];
+    uint32_t count = evlog_snapshot(snapshot, EVLOG_CAPACITY);
+    char line[EVLOG_LINE + 24];
+    for (uint32_t i = 0; i < count; i++)
+    {
+        snprintf(line, sizeof(line), "[%lu.%03lus] %s",
+                 snapshot[i].ms / 1000, snapshot[i].ms % 1000, snapshot[i].text);
+        ble_log_str("EVT", line);
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+    snprintf(line, sizeof(line), "end of event log (%lu entries)", count);
+    ble_log_str("EVT", line);
+    vTaskDelete(NULL);
+}
+
+// Continuous telemetry stream: IMU + motor outputs at a fixed rate.
+static volatile bool stream_active = false;
+static volatile bool stream_stop_requested = false;
+
+static void telemetry_stream_task(void *pvParameters)
+{
+    uint32_t packed = (uint32_t)(uintptr_t)pvParameters;
+    uint32_t rate_hz = packed >> 8;
+    uint32_t seconds = packed & 0xFF;
+    int64_t end_us = esp_timer_get_time() + (int64_t)seconds * 1000000;
+    uint32_t period_ms = 1000 / rate_hz;
+
+    while (!stream_stop_requested && esp_timer_get_time() < end_us &&
+           conn_handle != BLE_HS_CONN_HANDLE_NONE)
+    {
+        icm42688p_data_t imu = {0};
+        bool imu_ok = icm42688p_read_data(&imu) == ESP_OK;
+        uint16_t motors[4];
+        if (dshot_mode_active())
+        {
+            dshot_get_values(motors);
+        }
+        else
+        {
+            motor_get_speeds(motors);
+        }
+
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "st a=%+.3f,%+.3f,%+.3f g=%+.1f,%+.1f,%+.1f m=[%u,%u,%u,%u]%s",
+                 imu.accel_x, imu.accel_y, imu.accel_z,
+                 imu.gyro_x, imu.gyro_y, imu.gyro_z,
+                 motors[0], motors[1], motors[2], motors[3],
+                 imu_ok ? "" : " imu_err");
+        ble_log_str("STR", line);
+        vTaskDelay(pdMS_TO_TICKS(period_ms));
+    }
+    ble_log_str("STR", "stream end");
+    stream_active = false;
+    vTaskDelete(NULL);
 }
 
 static void send_sensor_telemetry(void)
@@ -181,177 +240,15 @@ static void send_sensor_telemetry(void)
 static void send_motor_telemetry(void)
 {
     char message[240];
-    motor_get_debug_status(message, sizeof(message));
+    if (dshot_mode_active())
+    {
+        dshot_get_debug_status(message, sizeof(message));
+    }
+    else
+    {
+        motor_get_debug_status(message, sizeof(message));
+    }
     ble_log_str("DBG", message);
-}
-
-static void reset_ota_state(void)
-{
-    ota_handle = 0;
-    ota_partition = NULL;
-    ota_expected_size = 0;
-    ota_received_size = 0;
-    ota_expected_seq = 0;
-    ota_in_progress = false;
-}
-
-static int handle_ota_begin(const uint8_t *payload, uint16_t len)
-{
-    if (len != PENDRAGON_BLE_OTA_BEGIN_LEN)
-    {
-        ble_log_str("OTA", "begin rejected: expected 5-byte payload");
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-    if (ota_in_progress)
-    {
-        ble_log_str("OTA", "begin rejected: OTA already in progress");
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    uint32_t firmware_size = read_le_u32(&payload[1]);
-    ota_partition = esp_ota_get_next_update_partition(NULL);
-    if (ota_partition == NULL)
-    {
-        ble_log_str("OTA", "begin failed: no update partition");
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    if (firmware_size == 0 || firmware_size > ota_partition->size)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "begin rejected: size=%lu partition=%lu",
-                 firmware_size, ota_partition->size);
-        ble_log_str("OTA", message);
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-
-    motor_adjust_power(-1000);
-    esp_err_t ret = esp_ota_begin(ota_partition, firmware_size, &ota_handle);
-    if (ret != ESP_OK)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "begin failed: %s", esp_err_to_name(ret));
-        ble_log_str("OTA", message);
-        reset_ota_state();
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    ota_expected_size = firmware_size;
-    ota_received_size = 0;
-    ota_expected_seq = 0;
-    ota_in_progress = true;
-
-    char message[120];
-    snprintf(message, sizeof(message), "begin ok partition=%s size=%lu",
-             ota_partition->label, firmware_size);
-    ble_log_str("OTA", message);
-    return 0;
-}
-
-static int handle_ota_data(const uint8_t *payload, uint16_t len)
-{
-    if (!ota_in_progress || ota_handle == 0)
-    {
-        ble_log_str("OTA", "data rejected: no OTA in progress");
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    if (len <= PENDRAGON_BLE_OTA_DATA_HEADER_LEN)
-    {
-        ble_log_str("OTA", "data rejected: empty chunk");
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-
-    uint16_t seq = read_le_u16(&payload[1]);
-    if (seq != ota_expected_seq)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "data rejected: seq=%u expected=%u",
-                 seq, ota_expected_seq);
-        ble_log_str("OTA", message);
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    const uint8_t *chunk = &payload[PENDRAGON_BLE_OTA_DATA_HEADER_LEN];
-    size_t chunk_len = len - PENDRAGON_BLE_OTA_DATA_HEADER_LEN;
-    if (ota_received_size + chunk_len > ota_expected_size)
-    {
-        ble_log_str("OTA", "data rejected: would exceed image size");
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-
-    esp_err_t ret = esp_ota_write(ota_handle, chunk, chunk_len);
-    if (ret != ESP_OK)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "write failed: %s", esp_err_to_name(ret));
-        ble_log_str("OTA", message);
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    ota_received_size += chunk_len;
-    ota_expected_seq++;
-
-    if ((ota_expected_seq % 32) == 0 || ota_received_size == ota_expected_size)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "progress %u/%u seq=%u",
-                 (unsigned)ota_received_size, (unsigned)ota_expected_size,
-                 ota_expected_seq);
-        ble_log_str("OTA", message);
-    }
-    return 0;
-}
-
-static int handle_ota_end(void)
-{
-    if (!ota_in_progress || ota_handle == 0)
-    {
-        ble_log_str("OTA", "end rejected: no OTA in progress");
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    if (ota_received_size != ota_expected_size)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "end rejected: received=%u expected=%u",
-                 (unsigned)ota_received_size, (unsigned)ota_expected_size);
-        ble_log_str("OTA", message);
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    esp_err_t ret = esp_ota_end(ota_handle);
-    if (ret != ESP_OK)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "end failed: %s", esp_err_to_name(ret));
-        ble_log_str("OTA", message);
-        reset_ota_state();
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    ret = esp_ota_set_boot_partition(ota_partition);
-    if (ret != ESP_OK)
-    {
-        char message[120];
-        snprintf(message, sizeof(message), "set boot failed: %s", esp_err_to_name(ret));
-        ble_log_str("OTA", message);
-        reset_ota_state();
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-
-    ble_log_str("OTA", "complete; rebooting into new firmware");
-    reset_ota_state();
-    xTaskCreate(delayed_restart_task, "ble_ota_restart", 2048, NULL, 5, NULL);
-    return 0;
-}
-
-static int handle_ota_abort(void)
-{
-    if (ota_in_progress && ota_handle != 0)
-    {
-        esp_ota_abort(ota_handle);
-    }
-    reset_ota_state();
-    ble_log_str("OTA", "aborted");
-    return 0;
 }
 
 static int handle_command_payload(const uint8_t *payload, uint16_t len)
@@ -368,6 +265,11 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
     case PENDRAGON_BLE_CMD_POWER_UP:
     case PENDRAGON_BLE_CMD_POWER_DOWN:
     {
+        if (dshot_mode_active())
+        {
+            ble_log_str("DBG", "power cmd ignored: dshot config mode (use 0xD2)");
+            return 0;
+        }
         uint16_t step = PENDRAGON_BLE_DEFAULT_POWER_STEP;
         if (len >= 2)
         {
@@ -376,7 +278,132 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
         ESP_LOGI(TAG, "BLE: %s step=%u",
                  opcode == PENDRAGON_BLE_CMD_POWER_UP ? "POWER_UP" : "POWER_DOWN",
                  step);
+        evlog("cmd pwr %s%u", opcode == PENDRAGON_BLE_CMD_POWER_UP ? "+" : "-", step);
         motor_adjust_power(opcode == PENDRAGON_BLE_CMD_POWER_UP ? step : -(int16_t)step);
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_MOTOR_MODE:
+    {
+        if (len < 2 || payload[1] > MOTOR_MODE_DSHOT_CONFIG)
+        {
+            ble_log_str("DBG", "motor mode rejected: expected [0xD0, 0|1]");
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        if (motor_mode_set_boot(payload[1]) != ESP_OK)
+        {
+            ble_log_str("DBG", "motor mode NVS write failed");
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        evlog("cmd mode=%u reboot", payload[1]);
+        char message[120];
+        snprintf(message, sizeof(message),
+                 "motor mode=%s saved; rebooting - power-cycle battery so ESC re-detects protocol",
+                 payload[1] == MOTOR_MODE_DSHOT_CONFIG ? "dshot-config" : "pwm");
+        ble_log_str("DBG", message);
+        ble_schedule_restart();
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_ESC_DIRECTION:
+    {
+        if (len < 3)
+        {
+            ble_log_str("DBG", "esc direction rejected: expected [0xD1, mask, dir]");
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        evlog("cmd dir mask=%02x rev=%u", payload[1], payload[2]);
+        esp_err_t ret = dshot_request_direction(payload[1], payload[2] != 0);
+        if (ret != ESP_OK)
+        {
+            char message[100];
+            snprintf(message, sizeof(message), "esc direction rejected: %s",
+                     esp_err_to_name(ret));
+            ble_log_str("DBG", message);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        ble_log_str("DBG", "esc direction sequence queued");
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_ESC_DIRECTION_PROBE:
+    {
+        if (len < 4)
+        {
+            ble_log_str("DBG", "probe rejected: expected [0xD3, motor, thr_lo, thr_hi]");
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        evlog("cmd probe m=%u thr=%u", payload[1], read_le_u16(&payload[2]));
+        esp_err_t ret = dshot_request_probe(payload[1], read_le_u16(&payload[2]));
+        if (ret != ESP_OK)
+        {
+            char message[100];
+            snprintf(message, sizeof(message), "probe rejected: %s",
+                     esp_err_to_name(ret));
+            ble_log_str("DBG", message);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        ble_log_str("DBG", "probe queued");
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_MOTOR_TRIM:
+    {
+        char message[100];
+        if (len >= 5)
+        {
+            esp_err_t ret = motor_set_trims(&payload[1]);
+            if (ret != ESP_OK)
+            {
+                snprintf(message, sizeof(message), "trim rejected: %s (valid 50-150)",
+                         esp_err_to_name(ret));
+                ble_log_str("DBG", message);
+                return BLE_ATT_ERR_UNLIKELY;
+            }
+        }
+        uint8_t trims[4];
+        motor_get_trims(trims);
+        snprintf(message, sizeof(message), "trim tr=%u br=%u tl=%u bl=%u",
+                 trims[0], trims[1], trims[2], trims[3]);
+        ble_log_str("DBG", message);
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_ESC_RAW_CMD:
+    {
+        if (len < 3)
+        {
+            ble_log_str("DBG", "raw cmd rejected: expected [0xD5, motor, cmd]");
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        evlog("cmd raw m=%u c=%u", payload[1], payload[2]);
+        esp_err_t ret = dshot_request_raw_command(payload[1], payload[2]);
+        if (ret != ESP_OK)
+        {
+            char message[100];
+            snprintf(message, sizeof(message), "raw cmd rejected: %s",
+                     esp_err_to_name(ret));
+            ble_log_str("DBG", message);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_ESC_TEST_THROTTLE:
+    {
+        if (len < 3)
+        {
+            ble_log_str("DBG", "esc throttle rejected: expected [0xD2, lo, hi]");
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        uint16_t value = read_le_u16(&payload[1]);
+        evlog("cmd dshot thr=%u", value);
+        esp_err_t ret = dshot_set_test_throttle(value);
+        if (ret != ESP_OK)
+        {
+            char message[100];
+            snprintf(message, sizeof(message), "esc throttle rejected: %s",
+                     esp_err_to_name(ret));
+            ble_log_str("DBG", message);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        char message[80];
+        snprintf(message, sizeof(message), "esc test throttle set to %u", value);
+        ble_log_str("DBG", message);
         return 0;
     }
     case PENDRAGON_BLE_CMD_PING:
@@ -391,14 +418,53 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
     case PENDRAGON_BLE_CMD_MOTOR_STATUS:
         send_motor_telemetry();
         return 0;
+    case PENDRAGON_BLE_CMD_TELEMETRY_STREAM:
+    {
+        if (len < 2 || payload[1] == 0)
+        {
+            stream_stop_requested = true;
+            ble_log_str("DBG", "stream stop requested");
+            return 0;
+        }
+        if (stream_active)
+        {
+            ble_log_str("DBG", "stream already running");
+            return 0;
+        }
+        uint32_t rate_hz = payload[1] > 20 ? 20 : payload[1];
+        uint32_t seconds = len >= 3 && payload[2] > 0 ? payload[2] : 10;
+        if (seconds > 60)
+        {
+            seconds = 60;
+        }
+        stream_stop_requested = false;
+        stream_active = true;
+        uint32_t packed = (rate_hz << 8) | seconds;
+        if (xTaskCreate(telemetry_stream_task, "ble_stream", 6144,
+                        (void *)(uintptr_t)packed, 3, NULL) != pdPASS)
+        {
+            stream_active = false;
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        evlog("stream start %luHz %lus", rate_hz, seconds);
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_EVENT_LOG:
+        if (xTaskCreate(evlog_dump_task, "evlog_dump", 6144, NULL, 3, NULL) != pdPASS)
+        {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return 0;
     case PENDRAGON_BLE_CMD_OTA_BEGIN:
-        return handle_ota_begin(payload, len);
+        return ble_ota_handle_begin(payload, len);
     case PENDRAGON_BLE_CMD_OTA_DATA:
-        return handle_ota_data(payload, len);
+        return ble_ota_handle_data(payload, len);
     case PENDRAGON_BLE_CMD_OTA_END:
-        return handle_ota_end();
+        return ble_ota_handle_end();
     case PENDRAGON_BLE_CMD_OTA_ABORT:
-        return handle_ota_abort();
+        return ble_ota_handle_abort();
+    case PENDRAGON_BLE_CMD_OTA_STATUS:
+        return ble_ota_handle_status();
     default:
         ESP_LOGW(TAG, "BLE: Unknown opcode 0x%02X", opcode);
         return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
@@ -409,6 +475,11 @@ static void delayed_restart_task(void *pvParameters)
 {
     vTaskDelay(pdMS_TO_TICKS(700));
     esp_restart();
+}
+
+void ble_schedule_restart(void)
+{
+    xTaskCreate(delayed_restart_task, "delayed_restart", 2048, NULL, 5, NULL);
 }
 
 // BLE GAP event callback
@@ -424,6 +495,7 @@ static int app_gap_event_handler(struct ble_gap_event *event, void *arg)
                  event->connect.status == 0 ? "established" : "failed",
                  event->connect.status);
 
+        evlog("ble connect status=%d", event->connect.status);
         if (event->connect.status == 0)
         {
             conn_handle = event->connect.conn_handle;
@@ -442,10 +514,21 @@ static int app_gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "Disconnected; reason=%d", event->disconnect.reason);
+        evlog("ble disconnect reason=%d, motors zeroed", event->disconnect.reason);
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
 
         // Failsafe: reduce collective to 0 quickly
-        motor_adjust_power(-1000);
+        if (dshot_mode_active())
+        {
+            dshot_set_test_throttle(0);
+        }
+        else
+        {
+            motor_adjust_power(-1000);
+        }
+
+        // OTA session is intentionally kept alive across disconnects so the
+        // client can resume (query 0xC4). A new OTA_BEGIN supersedes it.
 
         // Restart advertising
         app_advertise();

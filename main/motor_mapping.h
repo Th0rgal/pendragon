@@ -15,13 +15,16 @@ typedef struct
 
 // Default placeholder mapping for an X-quad; tune with mapping test logs.
 // Order must match motor_id_t order: TR, BR, TL, BL.
+// Yaw column from measured spin directions (2026-07-03 ESC config):
+// TR+BL spin CCW, TL+BR spin CW (viewed from above). A CCW motor's drag
+// reaction torques the frame CW looking down => positive yaw influence.
 static const MotorInfluence DEFAULT_MOTOR_INFLUENCE[4] = {
     //  TR         BR         TL         BL
     // roll, pitch, yaw
-    {+1.0f, -1.0f, 0.0f}, // Top Right
-    {+1.0f, +1.0f, 0.0f}, // Bottom Right
-    {-1.0f, -1.0f, 0.0f}, // Top Left
-    {-1.0f, +1.0f, 0.0f}, // Bottom Left
+    {+1.0f, -1.0f, +1.0f}, // Top Right (CCW)
+    {+1.0f, +1.0f, -1.0f}, // Bottom Right (CW)
+    {-1.0f, -1.0f, -1.0f}, // Top Left (CW)
+    {-1.0f, +1.0f, +1.0f}, // Bottom Left (CCW)
 };
 
 #endif // MOTOR_MAPPING_H

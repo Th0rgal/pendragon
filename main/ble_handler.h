@@ -22,4 +22,7 @@ esp_err_t send_telemetry(const void *data, size_t len);
 // Format on wire: "<TAG>: <MSG>" truncated to current MTU.
 esp_err_t ble_log_str(const char *tag, const char *msg);
 
+// Restart the chip after a short delay (lets pending notifications flush).
+void ble_schedule_restart(void);
+
 #endif // BLE_HANDLER_H

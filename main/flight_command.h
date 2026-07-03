@@ -1,10 +1,13 @@
-#ifndef COMMAND_HANDLER_H
-#define COMMAND_HANDLER_H
+#ifndef FLIGHT_COMMAND_H
+#define FLIGHT_COMMAND_H
 
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-// Structure to hold flight commands
+// Flight command consumed by the ESC control loop. Currently only fed over
+// BLE (collective power adjustments); the queue is the insertion point for
+// the future stabilization/flight controller.
 typedef struct
 {
     float throttle;  // 0.0 to 1.0
@@ -15,10 +18,7 @@ typedef struct
     bool stabilize;  // true = enable simple stabilization mode
 } flight_command_t;
 
-// External queue declaration
+// Owned by main.c, consumed by esc_control_task.
 extern QueueHandle_t command_queue;
 
-// Function prototypes
-void command_handler_task(void *pvParameters);
-
-#endif // COMMAND_HANDLER_H
+#endif // FLIGHT_COMMAND_H

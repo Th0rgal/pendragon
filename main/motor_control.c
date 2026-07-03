@@ -6,13 +6,11 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/portmacro.h"
-#include "command_handler.h"  // For flight_command_t
+#include "flight_command.h"   // For flight_command_t
 #include "icm42688p_sensor.h" // For IMU data
 #include "motor_mapping.h"    // For readable influence mapping
+#include "nvs.h"
 #include <stdio.h>
-
-// Queue handles declared in main.c
-extern QueueHandle_t command_queue;
 
 // Utility macros
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -68,6 +66,9 @@ const uint8_t MOTOR_CHANNELS[MOTOR_COUNT] = {
 // Global state
 static uint8_t motor_ramp_rates[MOTOR_COUNT] = {5, 5, 5, 5};      // Default ramp rate (units per 100ms)
 static uint16_t current_motor_speeds[MOTOR_COUNT] = {0, 0, 0, 0}; // Current speed for each motor
+// Per-motor thrust trim (percent, 100 = no correction). Compensates weak or
+// damaged motors/props; persisted in NVS, applied to the collective mix.
+static uint8_t motor_trim_pct[MOTOR_COUNT] = {100, 100, 100, 100};
 static bool stabilization_enabled = true;
 static uint16_t commanded_collective = 0; // 0..1000 collective power target
 static portMUX_TYPE motor_state_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -190,6 +191,8 @@ void init_motors(void)
 
     // Initialize default acceleration for all motors
     set_motor_acceleration(MOTOR_ALL, 5);
+
+    motor_load_trims();
 }
 
 // Set motor speed (0-1000 input range)
@@ -368,10 +371,11 @@ void esc_control_task(void *pvParameters)
             }
         }
 
-        // Build per-motor target from collective and stabilization
+        // Build per-motor target from collective, thrust trim, stabilization
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
-            target_throttles[i] = collective_snapshot;
+            uint32_t trimmed = ((uint32_t)collective_snapshot * motor_trim_pct[i]) / 100;
+            target_throttles[i] = (uint16_t)MIN(trimmed, 1000);
         }
 
         if (imu_ok)
@@ -421,6 +425,86 @@ void esc_control_task(void *pvParameters)
     }
 }
 
+#define TRIM_NVS_NAMESPACE "pendragon"
+#define TRIM_NVS_KEY "mtrim"
+#define TRIM_MIN_PCT 50
+#define TRIM_MAX_PCT 150
+
+void motor_load_trims(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TRIM_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK)
+    {
+        return;
+    }
+    uint8_t stored[MOTOR_COUNT];
+    size_t len = sizeof(stored);
+    if (nvs_get_blob(handle, TRIM_NVS_KEY, stored, &len) == ESP_OK && len == sizeof(stored))
+    {
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            if (stored[i] >= TRIM_MIN_PCT && stored[i] <= TRIM_MAX_PCT)
+            {
+                motor_trim_pct[i] = stored[i];
+            }
+        }
+    }
+    nvs_close(handle);
+}
+
+esp_err_t motor_set_trims(const uint8_t trims_pct[4])
+{
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        // 0 (or 0xFF) leaves that motor's trim unchanged.
+        if (trims_pct[i] == 0 || trims_pct[i] == 0xFF)
+        {
+            continue;
+        }
+        if (trims_pct[i] < TRIM_MIN_PCT || trims_pct[i] > TRIM_MAX_PCT)
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        if (trims_pct[i] != 0 && trims_pct[i] != 0xFF)
+        {
+            motor_trim_pct[i] = trims_pct[i];
+        }
+    }
+
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(TRIM_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+    ret = nvs_set_blob(handle, TRIM_NVS_KEY, motor_trim_pct, sizeof(motor_trim_pct));
+    if (ret == ESP_OK)
+    {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return ret;
+}
+
+void motor_get_trims(uint8_t trims_pct[4])
+{
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        trims_pct[i] = motor_trim_pct[i];
+    }
+}
+
+void motor_get_speeds(uint16_t speeds[4])
+{
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        speeds[i] = current_motor_speeds[i];
+    }
+}
+
 // ===== New public entry points used by BLE opcodes =====
 void motor_adjust_power(int16_t delta_step_0_to_1000)
 {
@@ -465,8 +549,9 @@ void motor_get_debug_status(char *buffer, size_t buffer_len)
     portEXIT_CRITICAL(&motor_state_mux);
 
     snprintf(buffer, buffer_len,
-             "motor collective=%u timer=%s ch=[%s,%s,%s,%s] duty=[%s,%s,%s,%s] upd=[%s,%s,%s,%s]",
+             "motor collective=%u trim=[%u,%u,%u,%u] timer=%s ch=[%s,%s,%s,%s] duty=[%s,%s,%s,%s] upd=[%s,%s,%s,%s]",
              collective_snapshot,
+             motor_trim_pct[0], motor_trim_pct[1], motor_trim_pct[2], motor_trim_pct[3],
              esp_err_to_name(motor_timer_config_status),
              esp_err_to_name(motor_channel_config_status[0]),
              esp_err_to_name(motor_channel_config_status[1]),

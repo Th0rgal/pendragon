@@ -1,11 +1,13 @@
 idf_component_register(
-    SRCS 
+    SRCS
         "main.c"
         "motor_control.c"
         "led_handler.c"
-        "command_handler.c"
         "ble_handler.c"
+        "ble_ota.c"
         "icm42688p_sensor.c"
+        "dshot_esc.c"
+        "evlog.c"
     INCLUDE_DIRS "."
     REQUIRES 
         driver

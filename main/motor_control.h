@@ -40,4 +40,14 @@ void esc_control_task(void *pvParameters);
 void motor_adjust_power(int16_t delta_step_0_to_1000);
 void motor_get_debug_status(char *buffer, size_t buffer_len);
 
+// Per-motor thrust trim (percent, 50-150, 100 = neutral), NVS-persisted.
+// In motor_set_trims, 0 or 0xFF entries leave that motor unchanged.
+#include "esp_err.h"
+void motor_load_trims(void);
+esp_err_t motor_set_trims(const uint8_t trims_pct[4]);
+void motor_get_trims(uint8_t trims_pct[4]);
+
+// Current per-motor PWM output speeds (0-1000), motor_id_t order.
+void motor_get_speeds(uint16_t speeds[4]);
+
 #endif // MOTOR_CONTROL_H

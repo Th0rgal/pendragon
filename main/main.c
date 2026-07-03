@@ -7,11 +7,14 @@
 #include "nvs_flash.h"
 
 // #include "sensor_monitor.h" // Removed
-#include "command_handler.h"
+#include "flight_command.h"
 #include "motor_control.h"
 #include "led_handler.h"
 #include "ble_handler.h"
 #include "icm42688p_sensor.h" // new include
+#include "dshot_esc.h"
+#include "evlog.h"
+#include "esp_system.h"
 
 // Add near the top of the file, after the includes
 #define ENABLE_MAIN_LOGGING 0  // Set to 0 to disable main task logging
@@ -25,7 +28,6 @@ QueueHandle_t command_queue;
 
 // Task handles for monitoring
 // TaskHandle_t sensor_task_handle; // Removed
-TaskHandle_t command_task_handle;
 TaskHandle_t esc_task_handle;
 TaskHandle_t debug_task_handle;
 TaskHandle_t led_task_handle;
@@ -45,15 +47,6 @@ void debug_monitor_task(void *pvParameters)
     {
 #if ENABLE_MAIN_LOGGING
         // Check if tasks are still running (with null checks)
-        if (command_task_handle != NULL)
-        {
-            eTaskState command_state = eTaskGetState(command_task_handle);
-            ESP_LOGI(TAG, "  Command task: %s",
-                     (command_state == eReady || command_state == eRunning || command_state == eBlocked)
-                         ? "ACTIVE"
-                         : "INACTIVE");
-        }
-
 #if ENABLE_MOTOR_CONTROL
         if (esc_task_handle != NULL)
         {
@@ -79,10 +72,6 @@ void debug_monitor_task(void *pvParameters)
         ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
 #else
         // When logging is disabled, just check if tasks are still running without storing the state
-        if (command_task_handle != NULL)
-        {
-            eTaskGetState(command_task_handle);
-        }
 #if ENABLE_MOTOR_CONTROL
         if (esc_task_handle != NULL)
         {
@@ -155,11 +144,31 @@ void app_main(void)
 #endif
     // init_sensors(); // Removed
 
+    // Boot-time motor output mode: normal LEDC PWM flight mode, or DShot
+    // ESC-configuration mode (motor pins driven by RMT instead of LEDC).
+    uint8_t motor_mode = motor_mode_get_boot();
+    evlog("boot reset_reason=%d mode=%s heap=%lu",
+          esp_reset_reason(),
+          motor_mode == MOTOR_MODE_DSHOT_CONFIG ? "dshot" : "pwm",
+          esp_get_free_heap_size());
+    if (motor_mode == MOTOR_MODE_DSHOT_CONFIG)
+    {
+        ESP_LOGI(TAG, "Booting in DShot ESC config mode");
+        ret = dshot_config_start();
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "DShot config mode failed: %s", esp_err_to_name(ret));
+        }
+    }
+
 #if ENABLE_MOTOR_CONTROL
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Initializing motor control...");
 #endif
-    init_motors();
+    if (motor_mode == MOTOR_MODE_PWM)
+    {
+        init_motors();
+    }
 #else
 #if ENABLE_MAIN_LOGGING
     ESP_LOGI(TAG, "Motor control disabled - skipping initialization");
@@ -174,19 +183,36 @@ void app_main(void)
     // xTaskCreate(sensor_monitor_task, "sensor_monitor", 8192, (void *)startup_sync_semaphore, 6, &sensor_task_handle); // Removed
     // ESP_LOGI(TAG, "Sensor monitor task created"); // Removed
 
-    xTaskCreate(command_handler_task, "command_handler", 8192, (void *)startup_sync_semaphore, 5, &command_task_handle);
-    ESP_LOGI(TAG, "Command handler task created");
+    // NOTE: motors must only ever move on explicit BLE commands. Do not add
+    // tasks that generate flight commands automatically.
 
 #if ENABLE_MOTOR_CONTROL
-    xTaskCreate(esc_control_task, "esc_control", 8192, (void *)startup_sync_semaphore, 4, &esc_task_handle);
-    ESP_LOGI(TAG, "ESC control task created");
+    if (motor_mode == MOTOR_MODE_PWM)
+    {
+        xTaskCreate(esc_control_task, "esc_control", 8192, (void *)startup_sync_semaphore, 4, &esc_task_handle);
+        ESP_LOGI(TAG, "ESC control task created");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "ESC control task skipped (DShot config mode)");
+        esc_task_handle = NULL;
+    }
 #else
     ESP_LOGI(TAG, "ESC control task disabled");
     esc_task_handle = NULL; // Ensure it's null when disabled
 #endif
 
-    // Create LED task
-    xTaskCreate(led_handler_task, "led_handler", 4096, NULL, 2, &led_task_handle);
+    // Create LED task. Skipped in DShot config mode: the WS2812 driver needs
+    // an RMT TX channel and DShot uses all four; a dark LED marks config mode.
+    if (motor_mode == MOTOR_MODE_PWM)
+    {
+        xTaskCreate(led_handler_task, "led_handler", 4096, NULL, 2, &led_task_handle);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "LED task skipped (DShot config mode uses all RMT channels)");
+        led_task_handle = NULL;
+    }
 
     // Create ICM-42688-P sensor task
     xTaskCreate(icm42688p_sensor_task, "icm42688p_sensor", 8192, NULL, 3, &icm42688p_task_handle);
