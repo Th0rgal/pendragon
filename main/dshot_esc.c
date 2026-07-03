@@ -32,7 +32,7 @@ extern const uint8_t MOTOR_PINS[];
 #define DSHOT_CMD_SPIN_DIRECTION_2 8
 #define DSHOT_CMD_SAVE_SETTINGS 12
 
-#define DSHOT_MAX_TEST_THROTTLE 500 // raw 48..2047; ~23% cap for bench safety
+#define DSHOT_MAX_TEST_THROTTLE 700 // raw 48..2047; ~34% cap for bench safety
 
 #define NVS_NAMESPACE "pendragon"
 #define NVS_KEY_MOTOR_MODE "motor_mode"

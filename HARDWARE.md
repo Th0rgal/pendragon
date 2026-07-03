@@ -90,15 +90,22 @@ that mode — the firmware skips the LED task there (`ESP_ERROR_CHECK` inside
   (`0xD1` spin-direction + save; persists in the ESC across power cycles).
 - **Current ESC configuration** (standard quad-X): TR + BL `reversed` (CCW),
   TL + BR `normal` (CW).
-- **Prop types as mounted (measured via differential-thrust probe)**:
-  BR = CCW prop (strong signal, 40mg tilt), TL = CW, BL = CW (clear, ~30mg),
-  **TR = indeterminate** — its thrust response is weak and erratic in both
-  directions (13-17mg), suggesting a loose prop nut, damaged blade, or mount
-  issue on that corner. Inspect physically.
-- **Props need rearranging for flight**: diagonals must match. If TR's prop
-  is CCW, swap the BR and BL props → TR+BL carry CCW props, TL+BR carry CW,
-  matching the ESC configuration above. If TR's prop turns out to be CW, the
-  set is 3×CW + 1×CCW and a second CCW prop is needed.
+- **Prop map (CONFIRMED via all-motor yaw-torque test)**: TR = CCW,
+  BR = CCW, TL = CW, BL = CW — a proper 2+2 set, but mounted SIDE-WISE
+  (CCW pair on the right, CW pair on the left). Validation: spinning every
+  prop in its thrust direction gave ~+1.5dps net yaw drift (torques cancel),
+  while all-CW gave +9.5dps yaw plus a 22dps roll onset (right side thrusting
+  down) at only 21% throttle.
+- **One swap needed for flight**: exchange the BOTTOM RIGHT and BOTTOM LEFT
+  props → diagonals match (TR+BL CCW, TL+BR CW). After the swap set ESCs:
+  TR=reversed, BL=reversed (CCW); TL=normal, BR=normal (CW). Currently (props
+  side-wise) ESCs are on thrust-up settings TR+BR=reversed, TL+BL=normal.
+- **Measurement lesson**: single-motor tilt-magnitude probes are
+  stance-dependent and unreliable across sessions (they flip-flopped on
+  BR/BL/TR); the all-motor yaw-balance comparison at fixed throttle is the
+  decisive instrument. Trim calibration inherits the same stance noise —
+  recalibrate on the final prop config, same resting stance, and treat trims
+  as a soft prior for the PID rather than truth.
 - **Direction probing method** (opcode `0xD3`): pulses one motor while
   integrating gyro Z (reaction/drag torque; chip +Z down so CCW motor => +gz)
   and averaging accel deltas (upward thrust unloads the corner => tilt;

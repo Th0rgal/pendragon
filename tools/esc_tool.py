@@ -307,6 +307,64 @@ async def cmd_calibrate(client):
     log("Trims saved to NVS; they apply in PWM flight mode.")
 
 
+async def cmd_thrustmap(client, rounds=4):
+    """Definitive per-prop thrust-direction map.
+
+    For each motor and each ESC direction setting, run several probes and
+    take medians. The setting with the larger sustained tilt is the one where
+    the prop blows air DOWN (thrust up); the gyro sign at that setting names
+    the rotation (chip +Z down: CCW seen from above => +gz). Leaves every ESC
+    on its thrust-up setting. Single motor at <=23% throttle - cannot lift.
+    """
+    THROTTLE = 650
+    summary = {}
+    for motor in range(4):
+        name = MOTOR_NAMES[motor]
+        samples = {False: {"mags": [], "gzs": []}, True: {"mags": [], "gzs": []}}
+        # Interleave settings (A,B,A,B...) so both are measured under the
+        # same resting stance - tilt sensitivity drifts when the frame shifts.
+        for round_no in range(rounds):
+            for setting_reversed in (False, True):
+                label = "reversed" if setting_reversed else "normal"
+                log(f"=== {name}: '{label}' probe {round_no + 1}/{rounds} ===")
+                await set_direction(client, motor, setting_reversed)
+                probe = await probe_motor(client, motor, THROTTLE)
+                if probe:
+                    samples[setting_reversed]["mags"].append(probe["mag"])
+                    samples[setting_reversed]["gzs"].append(probe["gz"])
+
+        stats = {}
+        for setting_reversed in (False, True):
+            mags = sorted(samples[setting_reversed]["mags"])
+            gzs = samples[setting_reversed]["gzs"]
+            median_mag = mags[len(mags) // 2] if mags else 0.0
+            mean_gz = sum(gzs) / len(gzs) if gzs else 0.0
+            stats[setting_reversed] = (median_mag, mean_gz)
+            label = "reversed" if setting_reversed else "normal"
+            log(f"  {name} '{label}': median tilt {median_mag*1000:.1f}mg, "
+                f"mean gz {mean_gz:+.2f}deg")
+
+        mag_n, gz_n = stats[False]
+        mag_r, gz_r = stats[True]
+        best = mag_r > mag_n
+        ratio = max(mag_n, mag_r) / max(min(mag_n, mag_r), 1e-6)
+        gz_best = stats[best][1]
+        spin = "CCW" if gz_best > 0 else "CW"
+        await set_direction(client, motor, best)
+        summary[name] = {
+            "esc_setting": "reversed" if best else "normal",
+            "prop_thrust_direction": spin,
+            "tilt_ratio": ratio,
+            "confidence": "OK" if ratio > 1.4 else "LOW",
+        }
+
+    log("=== THRUST MAP (ESCs left on thrust-up settings) ===")
+    for name, r in summary.items():
+        log(f"  {name}: prop wants {r['prop_thrust_direction']}, "
+            f"esc={r['esc_setting']}, ratio x{r['tilt_ratio']:.1f} "
+            f"[{r['confidence']}]")
+
+
 async def cmd_auto(client):
     """Differential-thrust direction finder.
 
@@ -391,6 +449,8 @@ async def main():
             await cmd_auto(client)
         elif action == "calibrate":
             await cmd_calibrate(client)
+        elif action == "thrustmap":
+            await cmd_thrustmap(client, int(sys.argv[2]) if len(sys.argv) > 2 else 4)
         elif action == "evlog":
             await write(client, [OP_EVENT_LOG])
             await wait_telemetry("end of event log", timeout=15.0)
