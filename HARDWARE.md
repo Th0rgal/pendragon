@@ -22,9 +22,15 @@ Last updated: 2026-07-03 (bench findings from BLE motor/ESC test sessions).
   BLE+flash load on battery-only power — must be fixed before flight (USB
   power avoids it on the bench); (2) props need rearranging and the TOP RIGHT
   corner needs inspection; (3) no battery voltage sensing yet.
-- Next software milestone: IMU→frame axis mapping (needs a cleaner dedicated
-  probe run — calibration dax/day was too noisy except BR), then stabilization
-  (attitude estimation → rate/angle PID) for a stable hover just above ground.
+- Next software milestone: IMU→frame axis mapping — tooling ready
+  (`tools/axis_map.py`, uses the new per-motor throttle opcode 0xD6 with a
+  motor-liveness gate); needs one battery power-cycle to re-arm the ESC, then
+  a ~2min run. After that: stabilization (attitude estimation → rate/angle
+  PID) for a stable hover just above ground.
+- Prop swap reminder: EXCHANGE the BR and BL props between motors,
+  right-side-up (do NOT flip a prop upside-down — that ruins the airfoil, it
+  does not change handedness). Afterwards: set BR=normal, BL=reversed, then
+  recalibrate trims and re-run the yaw-balance check.
 
 ## Core components
 
@@ -74,6 +80,11 @@ Stabilization code must account for both.
   (namespace `pendragon`), toggled over BLE opcode `0xD0` + reboot.
 - The ESC detects its input protocol **only at ESC power-up** — after switching
   modes the battery must be unplugged/replugged, an ESP32 reboot is not enough.
+- **After any ESP32 reboot (e.g. OTA) the ESC may silently stop responding**
+  to DShot until a battery power-cycle: re-detection on signal resume is
+  unreliable (observed both working and failing on the same day). Before any
+  measurement run, do a liveness check — brief all-motor pulse, confirm az
+  vibration on the IMU (`tools/axis_map.py` does this automatically).
 
 ### Hardware constraint: RMT channels
 

@@ -383,6 +383,26 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
         }
         return 0;
     }
+    case PENDRAGON_BLE_CMD_ESC_MOTOR_THROTTLE:
+    {
+        if (len < 4)
+        {
+            ble_log_str("DBG", "motor throttle rejected: expected [0xD6, motor, lo, hi]");
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        uint16_t value = read_le_u16(&payload[2]);
+        evlog("cmd mthr m=%u thr=%u", payload[1], value);
+        esp_err_t ret = dshot_set_motor_throttle(payload[1], value);
+        if (ret != ESP_OK)
+        {
+            char message[100];
+            snprintf(message, sizeof(message), "motor throttle rejected: %s",
+                     esp_err_to_name(ret));
+            ble_log_str("DBG", message);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return 0;
+    }
     case PENDRAGON_BLE_CMD_ESC_TEST_THROTTLE:
     {
         if (len < 3)

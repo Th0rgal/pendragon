@@ -50,7 +50,9 @@ typedef enum
     // reports current trims. Persisted in NVS, applied in PWM flight mode.
     PENDRAGON_BLE_CMD_MOTOR_TRIM = 0xD4, // [tr, br, tl, bl]
     // Send a raw DShot command (1-47, e.g. 1-5 = beacon beeps) to one motor.
-    PENDRAGON_BLE_CMD_ESC_RAW_CMD = 0xD5 // [motor, cmd]
+    PENDRAGON_BLE_CMD_ESC_RAW_CMD = 0xD5,      // [motor, cmd]
+    // Set one motor's raw DShot throttle (0 stop, 48..cap). DShot mode only.
+    PENDRAGON_BLE_CMD_ESC_MOTOR_THROTTLE = 0xD6 // [motor, lo, hi]
 } pendragon_ble_opcode_t;
 
 #define PENDRAGON_BLE_OPCODE_MIN 0xA0

@@ -466,6 +466,23 @@ void dshot_get_values(uint16_t values[4])
     }
 }
 
+esp_err_t dshot_set_motor_throttle(uint8_t motor, uint16_t value)
+{
+    if (!dshot_active)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (motor >= DSHOT_MOTOR_COUNT || (value != 0 && value < 48))
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (value > DSHOT_MAX_TEST_THROTTLE)
+    {
+        value = DSHOT_MAX_TEST_THROTTLE;
+    }
+    return dshot_write_motor(motor, value, false);
+}
+
 esp_err_t dshot_set_test_throttle(uint16_t value)
 {
     if (!dshot_active)

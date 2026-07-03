@@ -27,6 +27,9 @@ esp_err_t dshot_request_direction(uint8_t mask, bool reversed);
 // Drive all motors at a raw DShot throttle (0 = stop, 48..2047 = spin).
 esp_err_t dshot_set_test_throttle(uint16_t value);
 
+// Drive a single motor at a raw DShot throttle (0 = stop, 48..cap).
+esp_err_t dshot_set_motor_throttle(uint8_t motor, uint16_t value);
+
 // Queue a direction probe: pulse `motor` at `throttle` several times while
 // integrating gyro Z. Results are reported over BLE telemetry.
 esp_err_t dshot_request_probe(uint8_t motor, uint16_t throttle);
