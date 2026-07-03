@@ -21,6 +21,8 @@ Usage:
   esc_tool.py probe <motor> <thr>    DShot mode: direction probe (gyro+accel)
   esc_tool.py auto                   DShot mode: differential-thrust direction
                                      detection + auto-fix on all motors
+  esc_tool.py calibrate              DShot mode: measure per-motor thrust and
+                                     write compensating trims (for PWM mode)
   esc_tool.py trim [tr br tl bl]     get/set per-motor thrust trim % (50-150)
   esc_tool.py rawcmd <motor> <cmd>   DShot mode: raw ESC command (1-5=beeps)
 
@@ -267,6 +269,44 @@ async def set_direction(client, motor, reversed_):
     await wait_telemetry("sequence complete", timeout=10.0)
 
 
+async def cmd_calibrate(client):
+    """Measure per-motor thrust (probe tilt) and write compensating trims.
+
+    Trims only apply in PWM flight mode; run this in DShot mode where
+    per-motor throttle exists, then switch modes. Re-run after any prop
+    change - trim compensates the motor+prop combination.
+    """
+    THROTTLE = 500
+    ROUNDS = 3
+    medians = {}
+    for motor in range(4):
+        values = []
+        for round_no in range(ROUNDS):
+            log(f"=== Motor {motor} ({MOTOR_NAMES[motor]}): thrust probe "
+                f"{round_no + 1}/{ROUNDS} ===")
+            probe = await probe_motor(client, motor, THROTTLE)
+            if probe:
+                values.append(probe["mag"])
+        values.sort()
+        medians[motor] = values[len(values) // 2] if values else 0.0
+        log(f"  median tilt {medians[motor]*1000:.1f}mg")
+
+    if any(m <= 0.002 for m in medians.values()):
+        weak = [MOTOR_NAMES[m] for m, v in medians.items() if v <= 0.002]
+        log(f"CALIBRATION ABORTED: no measurable thrust from {weak} - "
+            "inspect hardware before trimming")
+        return
+
+    target = max(medians.values())
+    raw = {m: 100.0 * target / medians[m] for m in medians}
+    scale = min(1.0, 150.0 / max(raw.values()))
+    trims = [max(50, min(150, round(raw[m] * scale))) for m in range(4)]
+    log(f"computed trims (tr,br,tl,bl): {trims}")
+    await write(client, [OP_MOTOR_TRIM] + trims)
+    await wait_telemetry("trim", timeout=5.0)
+    log("Trims saved to NVS; they apply in PWM flight mode.")
+
+
 async def cmd_auto(client):
     """Differential-thrust direction finder.
 
@@ -349,6 +389,8 @@ async def main():
             log(f"verdict: {verdict}")
         elif action == "auto":
             await cmd_auto(client)
+        elif action == "calibrate":
+            await cmd_calibrate(client)
         elif action == "evlog":
             await write(client, [OP_EVENT_LOG])
             await wait_telemetry("end of event log", timeout=15.0)
