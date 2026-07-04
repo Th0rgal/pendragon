@@ -19,6 +19,7 @@
 #include "motor_control.h"
 #include "icm42688p_sensor.h"
 #include "dshot_esc.h"
+#include "flight_ctrl.h"
 #include "ble_ota.h"
 #include "evlog.h"
 #include "esp_timer.h"
@@ -201,12 +202,15 @@ static void telemetry_stream_task(void *pvParameters)
             motor_get_speeds(motors);
         }
 
-        char line[160];
+        float roll = 0, pitch = 0;
+        flight_ctrl_get_attitude(&roll, &pitch);
+        char line[176];
         snprintf(line, sizeof(line),
-                 "st a=%+.3f,%+.3f,%+.3f g=%+.1f,%+.1f,%+.1f m=[%u,%u,%u,%u]%s",
+                 "st a=%+.3f,%+.3f,%+.3f g=%+.1f,%+.1f,%+.1f m=[%u,%u,%u,%u] att=%+.1f,%+.1f%s",
                  imu.accel_x, imu.accel_y, imu.accel_z,
                  imu.gyro_x, imu.gyro_y, imu.gyro_z,
                  motors[0], motors[1], motors[2], motors[3],
+                 roll, pitch,
                  imu_ok ? "" : " imu_err");
         ble_log_str("STR", line);
         vTaskDelay(pdMS_TO_TICKS(period_ms));
@@ -381,6 +385,55 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
             ble_log_str("DBG", message);
             return BLE_ATT_ERR_UNLIKELY;
         }
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_FLIGHT_ARM:
+    {
+        if (len < 2)
+        {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        evlog("cmd flight arm=%u", payload[1]);
+        esp_err_t ret = flight_ctrl_arm(payload[1] != 0);
+        if (ret != ESP_OK)
+        {
+            char message[100];
+            snprintf(message, sizeof(message), "arm rejected: %s",
+                     esp_err_to_name(ret));
+            ble_log_str("FLT", message);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_FLIGHT_COLLECTIVE:
+    {
+        if (len < 3)
+        {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        uint16_t target = read_le_u16(&payload[1]);
+        esp_err_t ret = flight_ctrl_set_collective(target);
+        if (ret != ESP_OK)
+        {
+            ble_log_str("FLT", "collective rejected: not armed");
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_FLIGHT_GAINS:
+    {
+        if (len < 3)
+        {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        flight_ctrl_set_gains(payload[1], payload[2]);
+        return 0;
+    }
+    case PENDRAGON_BLE_CMD_FLIGHT_STATUS:
+    {
+        char message[180];
+        flight_ctrl_get_debug(message, sizeof(message));
+        ble_log_str("FLT", message);
         return 0;
     }
     case PENDRAGON_BLE_CMD_ESC_OUTPUT:
@@ -562,6 +615,7 @@ static int app_gap_event_handler(struct ble_gap_event *event, void *arg)
         // entirely - a signal-less ESC disarms and cannot creep.
         if (dshot_mode_active())
         {
+            flight_ctrl_arm(false);
             dshot_output_set(false);
         }
         else

@@ -7,6 +7,7 @@ idf_component_register(
         "ble_ota.c"
         "icm42688p_sensor.c"
         "dshot_esc.c"
+        "flight_ctrl.c"
         "evlog.c"
     INCLUDE_DIRS "."
     REQUIRES 

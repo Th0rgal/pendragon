@@ -517,6 +517,34 @@ esp_err_t dshot_set_motor_throttle(uint8_t motor, uint16_t value)
     return dshot_write_motor(motor, value, false);
 }
 
+#define DSHOT_FLIGHT_MAX 1500
+
+esp_err_t dshot_write_flight_outputs(const uint16_t values[4])
+{
+    if (!dshot_active || !dshot_output_on)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
+    {
+        uint16_t value = values[motor];
+        if (value != 0 && value < 48)
+        {
+            value = 48;
+        }
+        if (value > DSHOT_FLIGHT_MAX)
+        {
+            value = DSHOT_FLIGHT_MAX;
+        }
+        esp_err_t ret = dshot_write_motor(motor, value, false);
+        if (ret != ESP_OK)
+        {
+            return ret;
+        }
+    }
+    return ESP_OK;
+}
+
 esp_err_t dshot_set_test_throttle(uint16_t value)
 {
     if (!dshot_active)

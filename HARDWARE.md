@@ -3,7 +3,25 @@
 Living document for the physical build. Keep this in sync when wiring changes.
 Last updated: 2026-07-03 (bench findings from BLE motor/ESC test sessions).
 
-## Current status (2026-07-03, night)
+## Current status (2026-07-04): FIRST FLIGHT
+
+- **The drone flew**: ~6s of stabilized hover at collective 780 (~38%),
+  ground-effect altitude, commanded landing, no aborts. Yaw damped to
+  +/-10dps (was -150dps runaway before the yaw-D term). Attitude held at
+  roll ~+5deg / pitch ~-5deg (stable but biased - see tuning list).
+- **Flight controller** (`main/flight_ctrl.c`, DShot mode, 100Hz):
+  complementary-filter attitude + angle-PI / rate-D roll+pitch + yaw rate
+  damping, trim-mixed outputs, slew-limited collective (buck-friendly),
+  auto-cut at 25deg/400dps/IMU-fail/disconnect. BLE: 0xE0 arm, 0xE1
+  collective, 0xE2 gains, 0xE3 status. Gains: kp=3.0 kd=0.6 ki=4.0 kdyaw=0.5.
+- Lift threshold ~750-800 raw collective with trims [71,71,92,122].
+- **Tuning next**: attitude bias (integrator clamp 70 insufficient or level
+  reference off), altitude is open-loop (collective), and the 5V buck fix
+  remains mandatory before flying without USB assist.
+- Bench flow: `uv run tools/flight_test.py 0:2 600:3 700:4 780:10` (arms,
+  steps collective, client aborts >12deg, always lands/disarms/silences).
+
+## Previous status (2026-07-03, night)
 
 - **Props are in the final flight arrangement**: owner swapped BR<->BL
   (identified by measurement — config-flatness test, tools/swap_id logic:

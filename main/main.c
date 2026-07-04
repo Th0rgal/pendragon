@@ -13,6 +13,7 @@
 #include "ble_handler.h"
 #include "icm42688p_sensor.h" // new include
 #include "dshot_esc.h"
+#include "flight_ctrl.h"
 #include "evlog.h"
 #include "esp_system.h"
 
@@ -159,6 +160,11 @@ void app_main(void)
         {
             ESP_LOGE(TAG, "DShot config mode failed: %s", esp_err_to_name(ret));
         }
+        else if (flight_ctrl_start() != ESP_OK)
+        {
+            ESP_LOGE(TAG, "flight control task failed to start");
+        }
+        motor_load_trims(); // flight controller mixes trims in DShot mode too
     }
 
 #if ENABLE_MOTOR_CONTROL

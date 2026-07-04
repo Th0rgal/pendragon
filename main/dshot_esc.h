@@ -36,6 +36,9 @@ esp_err_t dshot_set_test_throttle(uint16_t value);
 // Drive a single motor at a raw DShot throttle (0 = stop, 48..cap).
 esp_err_t dshot_set_motor_throttle(uint8_t motor, uint16_t value);
 
+// Flight-control path: write all four outputs (higher cap than bench tests).
+esp_err_t dshot_write_flight_outputs(const uint16_t values[4]);
+
 // Queue a direction probe: pulse `motor` at `throttle` several times while
 // integrating gyro Z. Results are reported over BLE telemetry.
 esp_err_t dshot_request_probe(uint8_t motor, uint16_t throttle);

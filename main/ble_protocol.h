@@ -56,7 +56,12 @@ typedef enum
     // Enable/disable DShot signal output. Boot default is OFF (lines silent,
     // ESC disarmed); output is cut on BLE disconnect. Motor commands require
     // output on. [0|1]
-    PENDRAGON_BLE_CMD_ESC_OUTPUT = 0xD7
+    PENDRAGON_BLE_CMD_ESC_OUTPUT = 0xD7,
+    // Flight controller (DShot mode): stabilized hover testing.
+    PENDRAGON_BLE_CMD_FLIGHT_ARM = 0xE0,        // [0|1] (arm needs stillness)
+    PENDRAGON_BLE_CMD_FLIGHT_COLLECTIVE = 0xE1, // [lo, hi] slew-limited target
+    PENDRAGON_BLE_CMD_FLIGHT_GAINS = 0xE2,      // [kp_x10, kd_x100]
+    PENDRAGON_BLE_CMD_FLIGHT_STATUS = 0xE3      // -> telemetry line
 } pendragon_ble_opcode_t;
 
 #define PENDRAGON_BLE_OPCODE_MIN 0xA0
