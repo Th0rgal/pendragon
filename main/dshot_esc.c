@@ -65,8 +65,63 @@ static rmt_encoder_handle_t dshot_copy_encoder = NULL;
 static SemaphoreHandle_t dshot_write_mutex = NULL;
 static QueueHandle_t dshot_dir_queue = NULL;
 static uint16_t dshot_current_values[DSHOT_MOTOR_COUNT] = {0};
+static bool dshot_telem_flags[DSHOT_MOTOR_COUNT] = {0};
 // Motor lines silent until explicitly enabled; a signal-less ESC disarms.
 static bool dshot_output_on = false;
+
+static void build_frame_symbols(uint16_t value, bool telemetry,
+                                rmt_symbol_word_t *symbols);
+
+// Burst refresher: instead of an infinite RMT loop restarted on every value
+// change (restarts glitch the line; ESCs disarm on signal loss and then
+// refuse to re-arm on a nonzero value), a 100Hz task queues finite bursts
+// back-to-back. Values change seamlessly on the next burst.
+#define DSHOT_BURST_FRAMES 9 // 9 x 1.07ms < 10ms tick: queue never backs up
+static rmt_symbol_word_t frame_banks[DSHOT_MOTOR_COUNT][2][DSHOT_FRAME_SYMBOLS];
+static int frame_bank_idx[DSHOT_MOTOR_COUNT] = {0};
+static volatile int bursts_in_flight[DSHOT_MOTOR_COUNT] = {0};
+
+static bool IRAM_ATTR on_burst_done(rmt_channel_handle_t chan,
+                                    const rmt_tx_done_event_data_t *edata,
+                                    void *user_ctx)
+{
+    int motor = (int)(intptr_t)user_ctx;
+    bursts_in_flight[motor]--;
+    return false;
+}
+
+static void dshot_refresh_task(void *pvParameters)
+{
+    while (1)
+    {
+        if (dshot_output_on)
+        {
+            xSemaphoreTake(dshot_write_mutex, portMAX_DELAY);
+            for (int m = 0; m < DSHOT_MOTOR_COUNT; m++)
+            {
+                if (bursts_in_flight[m] >= 2)
+                {
+                    continue; // previous bursts still playing
+                }
+                int bank = frame_bank_idx[m] ^ 1;
+                build_frame_symbols(dshot_current_values[m],
+                                    dshot_telem_flags[m], frame_banks[m][bank]);
+                rmt_transmit_config_t tx_config = {
+                    .loop_count = DSHOT_BURST_FRAMES};
+                if (rmt_transmit(dshot_channels[m], dshot_copy_encoder,
+                                 frame_banks[m][bank],
+                                 sizeof(frame_banks[m][bank]),
+                                 &tx_config) == ESP_OK)
+                {
+                    bursts_in_flight[m]++;
+                    frame_bank_idx[m] = bank;
+                }
+            }
+            xSemaphoreGive(dshot_write_mutex);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
 
 uint8_t motor_mode_get_boot(void)
 {
@@ -128,8 +183,8 @@ static void build_frame_symbols(uint16_t value, bool telemetry,
     symbols[16].duration1 = DSHOT_GAP_HALF_TICKS;
 }
 
-// Restart the motor's infinite-loop transmission with a new frame. The RMT
-// hardware then repeats it at ~1kHz with no CPU involvement.
+// Set a motor's value; the refresher task streams it continuously with no
+// line interruption. Value changes take effect within one burst (~10ms).
 static esp_err_t dshot_write_motor(int motor, uint16_t value, bool telemetry)
 {
     if (motor < 0 || motor >= DSHOT_MOTOR_COUNT || dshot_channels[motor] == NULL)
@@ -140,25 +195,11 @@ static esp_err_t dshot_write_motor(int motor, uint16_t value, bool telemetry)
     {
         return ESP_ERR_INVALID_STATE;
     }
-
-    rmt_symbol_word_t symbols[DSHOT_FRAME_SYMBOLS];
-    build_frame_symbols(value, telemetry, symbols);
-
     xSemaphoreTake(dshot_write_mutex, portMAX_DELAY);
-    rmt_disable(dshot_channels[motor]);
-    esp_err_t ret = rmt_enable(dshot_channels[motor]);
-    if (ret == ESP_OK)
-    {
-        rmt_transmit_config_t tx_config = {.loop_count = -1};
-        ret = rmt_transmit(dshot_channels[motor], dshot_copy_encoder,
-                           symbols, sizeof(symbols), &tx_config);
-    }
-    if (ret == ESP_OK)
-    {
-        dshot_current_values[motor] = value;
-    }
+    dshot_current_values[motor] = value;
+    dshot_telem_flags[motor] = telemetry;
     xSemaphoreGive(dshot_write_mutex);
-    return ret;
+    return ESP_OK;
 }
 
 typedef struct
@@ -374,6 +415,14 @@ esp_err_t dshot_config_start(void)
                      motor, MOTOR_PINS[motor], esp_err_to_name(ret));
             return ret;
         }
+        rmt_tx_event_callbacks_t callbacks = {.on_trans_done = on_burst_done};
+        rmt_tx_register_event_callbacks(dshot_channels[motor], &callbacks,
+                                        (void *)(intptr_t)motor);
+    }
+
+    if (xTaskCreate(dshot_refresh_task, "dshot_refresh", 4096, NULL, 7, NULL) != pdPASS)
+    {
+        return ESP_ERR_NO_MEM;
     }
 
     dshot_active = true;
@@ -398,27 +447,29 @@ esp_err_t dshot_output_set(bool enabled)
     }
     if (enabled)
     {
-        dshot_output_on = true;
+        xSemaphoreTake(dshot_write_mutex, portMAX_DELAY);
         for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
         {
-            esp_err_t ret = dshot_write_motor(motor, 0, false);
-            if (ret != ESP_OK)
-            {
-                dshot_output_on = false;
-                return ret;
-            }
+            dshot_current_values[motor] = 0;
+            dshot_telem_flags[motor] = false;
+            rmt_enable(dshot_channels[motor]); // idempotent-ish; err = already on
+            bursts_in_flight[motor] = 0;
         }
+        dshot_output_on = true;
+        xSemaphoreGive(dshot_write_mutex);
         ESP_LOGI(TAG, "DShot output enabled (zero throttle)");
         return ESP_OK;
     }
 
+    dshot_output_on = false;      // refresher stops queueing
+    vTaskDelay(pdMS_TO_TICKS(30)); // let in-flight bursts drain
     xSemaphoreTake(dshot_write_mutex, portMAX_DELAY);
     for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
     {
         rmt_disable(dshot_channels[motor]);
         dshot_current_values[motor] = 0;
+        bursts_in_flight[motor] = 0;
     }
-    dshot_output_on = false;
     xSemaphoreGive(dshot_write_mutex);
     ESP_LOGI(TAG, "DShot output disabled (lines silent)");
     return ESP_OK;

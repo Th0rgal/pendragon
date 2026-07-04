@@ -222,7 +222,16 @@ static void flight_task(void *pvParameters)
             }
             if (out < 0) out = 0;
             if (out > FLIGHT_MAX_MOTOR) out = FLIGHT_MAX_MOTOR;
-            outputs[m] = (uint16_t)out;
+            // Quantize: hold the previous value for small changes so each
+            // motor's DShot stream runs uninterrupted between updates
+            // (RMT loop restarts corrupt frames).
+            uint16_t quantized = (uint16_t)out;
+            if (quantized > last_outputs[m] ? quantized - last_outputs[m] < 5
+                                            : last_outputs[m] - quantized < 5)
+            {
+                quantized = last_outputs[m];
+            }
+            outputs[m] = quantized;
         }
 
         if (dshot_write_flight_outputs(outputs) != ESP_OK)
