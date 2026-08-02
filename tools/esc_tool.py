@@ -116,7 +116,10 @@ async def ensure_output(client):
     older firmware that lacks the opcode."""
     try:
         await write(client, [OP_ESC_OUTPUT, 1])
-        await asyncio.sleep(0.4)
+        # Firmware primes 2s of DShot0 after enabling output (ESC protocol
+        # re-scan + zero-throttle arming window); wait it out so subsequent
+        # commands are actually emitted.
+        await asyncio.sleep(2.5)
     except Exception:
         pass
 

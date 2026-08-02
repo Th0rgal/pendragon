@@ -71,6 +71,18 @@ static uint16_t dshot_current_values[DSHOT_MOTOR_COUNT] = {0};
 static bool dshot_telem_flags[DSHOT_MOTOR_COUNT] = {0};
 // Motor lines silent until explicitly enabled; a signal-less ESC disarms.
 static bool dshot_output_on = false;
+// Zero-throttle prime: after every silent->active transition the ESC re-runs
+// its input-protocol scan (~100ms per protocol, DShot150 mid-list) and then
+// requires ~300ms of zero throttle to arm. Emit only DShot0 for this window;
+// throttle values are stored and take effect when the prime expires.
+#define DSHOT_PRIME_MS 2000
+static volatile TickType_t dshot_enable_tick = 0;
+
+static bool dshot_in_prime(void)
+{
+    return dshot_output_on && (xTaskGetTickCount() - dshot_enable_tick) <
+                                  pdMS_TO_TICKS(DSHOT_PRIME_MS);
+}
 
 static void build_frame_symbols(uint16_t value, bool telemetry,
                                 rmt_symbol_word_t *symbols);
@@ -99,16 +111,18 @@ static void dshot_refresh_task(void *pvParameters)
     {
         if (dshot_output_on)
         {
+            bool prime = dshot_in_prime();
             xSemaphoreTake(dshot_write_mutex, portMAX_DELAY);
             for (int m = 0; m < DSHOT_MOTOR_COUNT; m++)
             {
-                if (bursts_in_flight[m] >= 2)
+                if (bursts_in_flight[m] >= 1)
                 {
-                    continue; // previous bursts still playing
+                    continue; // previous burst still playing (queue depth 1)
                 }
                 int bank = frame_bank_idx[m] ^ 1;
-                build_frame_symbols(dshot_current_values[m],
-                                    dshot_telem_flags[m], frame_banks[m][bank]);
+                build_frame_symbols(prime ? 0 : dshot_current_values[m],
+                                    prime ? false : dshot_telem_flags[m],
+                                    frame_banks[m][bank]);
                 rmt_transmit_config_t tx_config = {
                     .loop_count = DSHOT_BURST_FRAMES};
                 if (rmt_transmit(dshot_channels[m], dshot_copy_encoders[m],
@@ -329,6 +343,13 @@ static void dshot_worker_task(void *pvParameters)
             continue;
         }
 
+        // Direction/probe/raw sequences rely on their values actually being
+        // emitted: wait out the zero-throttle prime window first.
+        while (dshot_in_prime())
+        {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
         if (request.type == DSHOT_REQ_PROBE)
         {
             run_direction_probe(request.motor, request.throttle);
@@ -410,7 +431,11 @@ esp_err_t dshot_config_start(void)
             .clk_src = RMT_CLK_SRC_DEFAULT,
             .resolution_hz = DSHOT_RMT_RESOLUTION_HZ,
             .mem_block_symbols = 48,
-            .trans_queue_depth = 2,
+            // Depth 1: at most one driver-owned transaction per channel, so
+            // rmt_disable() cancels everything and no stale transaction can
+            // auto-start on the next rmt_enable(). Max inter-burst idle is
+            // ~1.9ms, far below the ESC's ~320ms signal-loss timeout.
+            .trans_queue_depth = 1,
         };
         ret = rmt_new_tx_channel(&channel_config, &dshot_channels[motor]);
         if (ret != ESP_OK)
@@ -459,9 +484,11 @@ esp_err_t dshot_output_set(bool enabled)
             rmt_enable(dshot_channels[motor]); // idempotent-ish; err = already on
             bursts_in_flight[motor] = 0;
         }
+        dshot_enable_tick = xTaskGetTickCount();
         dshot_output_on = true;
         xSemaphoreGive(dshot_write_mutex);
-        ESP_LOGI(TAG, "DShot output enabled (zero throttle)");
+        ESP_LOGI(TAG, "DShot output enabled (zero-throttle prime %dms)",
+                 DSHOT_PRIME_MS);
         return ESP_OK;
     }
 

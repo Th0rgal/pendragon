@@ -44,6 +44,23 @@ Last updated: 2026-08-02 (5V power rail rebuilt — brownout blocker cleared).
 - Note: firmware/BLE path was audited during diagnosis — per-motor values
   are correct end-to-end (`run_direction_probe` writes only its motor's
   channel; each motor has its own RMT channel and GPIO).
+- **External deep-dive (GPT, 2026-08-02) conclusions applied:**
+  - LED/RMT conflict (5 TX clients for 4 S3 channels) — already handled:
+    the LED task is skipped in DShot mode (`main.c`), motors own all 4.
+  - Shared copy encoder was a real design error but likely dormant (17
+    symbols fit one 48-word block; loop_count replays in hardware). Fixed
+    anyway: one encoder per channel.
+  - **Leading suspect for the shifting dead channels: no zero-throttle
+    acquisition window.** BLHeli_S re-scans protocols (~100ms each, DShot150
+    mid-list) after every signal loss, then needs ~300ms of zero throttle to
+    arm — and our output is cut on every BLE disconnect, i.e. between every
+    esc_tool command. Fix implemented: 2s DShot0 prime on every output
+    enable (values stored, emitted after the prime), `trans_queue_depth=1`
+    so `rmt_disable()` leaves no stale driver-queued transaction, esc_tool
+    waits out the prime. ESC signal-loss timeout is ~320ms (~160ms armed):
+    silence is NOT an instant stop — always command zero first.
+  - Still to verify with props off: whether the 2s prime revives all four
+    channels across battery-only boots; scope the four lines if not.
 
 ### SAFETY INCIDENT (2026-08-02): runaway motors during PWM bench test
 
