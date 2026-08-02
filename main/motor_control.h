@@ -38,6 +38,10 @@ void esc_control_task(void *pvParameters);
 
 // New: power adjust entry points used by BLE opcodes
 void motor_adjust_power(int16_t delta_step_0_to_1000);
+// Refresh the inactivity failsafe deadline (call on any received BLE command).
+void motor_command_keepalive(void);
+// Milliseconds since the last received BLE command.
+uint32_t motor_ms_since_last_command(void);
 void motor_get_debug_status(char *buffer, size_t buffer_len);
 
 // Per-motor thrust trim (percent, 50-150, 100 = neutral), NVS-persisted.

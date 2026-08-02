@@ -88,6 +88,9 @@ static int ble_gap_access_cb(uint16_t conn_handle_arg, uint16_t attr_handle,
             ESP_LOGE(TAG, "Failed to copy GATT write payload: rc=%d", rc);
             return BLE_ATT_ERR_UNLIKELY;
         }
+        // Any authenticated command traffic counts as "operator present" for
+        // the motor inactivity failsafe.
+        motor_command_keepalive();
         return handle_command_payload(payload, ctxt->om->om_len);
 
     default:

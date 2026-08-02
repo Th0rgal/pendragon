@@ -119,6 +119,14 @@ static void flight_task(void *pvParameters)
             continue;
         }
 
+        // Inactivity failsafe: same rationale as the PWM path (2026-08-02
+        // incident) — never rely on a BLE disconnect event to stop motors.
+        if (motor_ms_since_last_command() > 3000)
+        {
+            flight_cut("link inactivity");
+            continue;
+        }
+
         icm42688p_data_t d;
         if (icm42688p_read_data(&d) != ESP_OK)
         {

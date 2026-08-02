@@ -80,7 +80,13 @@ async def main():
                 log(f"=== Target collective {target}/1000 ===")
                 await adjust_collective(client, target - collective)
                 collective = target
-                await asyncio.sleep(hold)
+                # Keepalive pings: firmware cuts motors after 3s without a
+                # command (inactivity failsafe), so never sleep silently.
+                remaining = hold
+                while remaining > 0:
+                    await asyncio.sleep(min(1.0, remaining))
+                    remaining -= 1.0
+                    await write(client, [OP_PING], "PING (keepalive)")
                 await write(client, [OP_MOTOR_STATUS], f"MOTOR_STATUS @ {target}")
                 await asyncio.sleep(0.5)
         finally:

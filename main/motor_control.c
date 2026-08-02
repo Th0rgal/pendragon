@@ -9,6 +9,7 @@
 #include "flight_command.h"   // For flight_command_t
 #include "icm42688p_sensor.h" // For IMU data
 #include "motor_mapping.h"    // For readable influence mapping
+#include "evlog.h"
 #include "nvs.h"
 #include <stdio.h>
 
@@ -71,6 +72,12 @@ static uint16_t current_motor_speeds[MOTOR_COUNT] = {0, 0, 0, 0}; // Current spe
 static uint8_t motor_trim_pct[MOTOR_COUNT] = {100, 100, 100, 100};
 static bool stabilization_enabled = true;
 static uint16_t commanded_collective = 0; // 0..1000 collective power target
+// Inactivity failsafe (2026-08-02 incident: MCU/BLE stack died mid-test with
+// collective held at 340; the disconnect handler never ran and the LEDC kept
+// driving the motors). The control loop cuts power on its own if no command
+// has arrived recently — it must never depend on a BLE event to stop.
+#define COMMAND_FAILSAFE_TIMEOUT_MS 3000
+static volatile TickType_t last_command_tick = 0;
 static portMUX_TYPE motor_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static esp_err_t motor_timer_config_status = ESP_ERR_INVALID_STATE;
 static esp_err_t motor_channel_config_status[MOTOR_COUNT] = {
@@ -348,6 +355,7 @@ void esc_control_task(void *pvParameters)
             uint16_t new_collective = system_armed ? (uint16_t)(received_command.throttle * 1000.0f) : 0;
             portENTER_CRITICAL(&motor_state_mux);
             commanded_collective = MIN(MAX(new_collective, 0), 1000);
+            last_command_tick = xTaskGetTickCount();
             portEXIT_CRITICAL(&motor_state_mux);
 
 #if ENABLE_LOGGING
@@ -361,8 +369,25 @@ void esc_control_task(void *pvParameters)
         bool imu_ok = false;
         portENTER_CRITICAL(&motor_state_mux);
         uint16_t collective_snapshot = commanded_collective;
+        TickType_t last_cmd_snapshot = last_command_tick;
         portEXIT_CRITICAL(&motor_state_mux);
         bool active = (collective_snapshot > 0);
+
+        // Inactivity failsafe: motors only stay powered while commands keep
+        // arriving. Catches every failure the BLE disconnect callback can
+        // miss (stack death, missed event, client crash).
+        if (active && (xTaskGetTickCount() - last_cmd_snapshot) >
+                          pdMS_TO_TICKS(COMMAND_FAILSAFE_TIMEOUT_MS))
+        {
+            portENTER_CRITICAL(&motor_state_mux);
+            commanded_collective = 0;
+            portEXIT_CRITICAL(&motor_state_mux);
+            collective_snapshot = 0;
+            active = false;
+            system_armed = false;
+            evlog("FAILSAFE: no command for %dms at collective>0, motors cut",
+                  COMMAND_FAILSAFE_TIMEOUT_MS);
+        }
         if (stabilization_enabled && active)
         {
             if (icm42688p_read_data(&imu) == ESP_OK)
@@ -506,6 +531,21 @@ void motor_get_speeds(uint16_t speeds[4])
 }
 
 // ===== New public entry points used by BLE opcodes =====
+void motor_command_keepalive(void)
+{
+    portENTER_CRITICAL(&motor_state_mux);
+    last_command_tick = xTaskGetTickCount();
+    portEXIT_CRITICAL(&motor_state_mux);
+}
+
+uint32_t motor_ms_since_last_command(void)
+{
+    portENTER_CRITICAL(&motor_state_mux);
+    TickType_t last = last_command_tick;
+    portEXIT_CRITICAL(&motor_state_mux);
+    return (uint32_t)((xTaskGetTickCount() - last) * portTICK_PERIOD_MS);
+}
+
 void motor_adjust_power(int16_t delta_step_0_to_1000)
 {
     bool hard_stop = false;
@@ -517,6 +557,7 @@ void motor_adjust_power(int16_t delta_step_0_to_1000)
     if (updated > 1000)
         updated = 1000;
     commanded_collective = (uint16_t)updated;
+    last_command_tick = xTaskGetTickCount();
     hard_stop = delta_step_0_to_1000 < 0 && updated == 0;
     if (hard_stop)
     {

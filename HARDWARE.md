@@ -45,6 +45,25 @@ Last updated: 2026-08-02 (5V power rail rebuilt — brownout blocker cleared).
   are correct end-to-end (`run_direction_probe` writes only its motor's
   channel; each motor has its own RMT channel and GPIO).
 
+### SAFETY INCIDENT (2026-08-02): runaway motors during PWM bench test
+
+- During a `motor_test.py` collective ramp (340/1000, props ON), the BLE
+  link died mid-test and the device stopped advertising entirely. The
+  disconnect-event failsafe (`ble_handler.c`) never executed — when the MCU
+  or BLE stack is dead, no callback runs — and the LEDC peripheral kept
+  driving the last PWM value. Motors ran uncommanded until the operator
+  pulled the battery by hand. Root cause of the hang itself: unknown (evlog
+  to be read next session; suspect crash/hang while PWM active).
+- **Fix (implemented same day)**: firmware-side inactivity failsafe in BOTH
+  motor paths, independent of BLE events. Any received BLE command refreshes
+  a deadline; the 100Hz control loops cut motors themselves after **3s**
+  without traffic (`motor_control.c` PWM loop zeroes collective;
+  `flight_ctrl.c` calls `flight_cut("link inactivity")`). Bench clients
+  (`motor_test.py`, `flight_test.py`) now send ~1Hz keepalives during holds.
+- **Bench rules going forward**: props OFF for any test that doesn't need
+  thrust measurement; battery connector physically within arm's reach
+  during every powered test; never rely on a software stop as the only stop.
+
 ### Still TODO from the 07-04 list
 
 - Attitude bias tuning; battery voltage sensing mod; TR motor mechanical

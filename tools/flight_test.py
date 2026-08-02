@@ -61,8 +61,15 @@ async def main():
                 log(f">>> collective {collective} for {secs}s")
                 await cmd(0xE1, collective & 0xFF, collective >> 8)
                 end = time.monotonic() + secs
+                last_keepalive = time.monotonic()
                 while time.monotonic() < end and not ABORT.is_set():
                     await asyncio.sleep(0.1)
+                    # Firmware cuts motors after 3s without a command
+                    # (inactivity failsafe): re-send the collective as
+                    # keepalive during silent holds.
+                    if time.monotonic() - last_keepalive >= 1.0:
+                        await cmd(0xE1, collective & 0xFF, collective >> 8)
+                        last_keepalive = time.monotonic()
                 if ABORT.is_set():
                     log("!!! client abort: attitude > 12deg")
         finally:
