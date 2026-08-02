@@ -11,7 +11,7 @@ The primary goal of this firmware is to enable flight control and telemetry via 
 *   **Microcontroller:** ESP32-S3 (N18R8 variant)
 *   **Sensors:** ICM-42688-P IMU (SPI)
 *   **Motors & ESCs:** UAngel 4-in-1 45A BLHeli_S (3-6S)
-*   **Frame & Power:** ~4S LiPo → ESC "V" 15V → buck → 5V
+*   **Frame & Power:** ~4S LiPo → ESC "V" 15V → Mini560 buck (5V) + 2200µF → ESP32 5V0
 
 See [HARDWARE.md](HARDWARE.md) for the full wiring map, protocols, bench
 findings, and battery-monitoring plan.

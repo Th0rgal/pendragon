@@ -1,9 +1,56 @@
 # Pendragon — Hardware & Wiring Reference
 
 Living document for the physical build. Keep this in sync when wiring changes.
-Last updated: 2026-07-03 (bench findings from BLE motor/ESC test sessions).
+Last updated: 2026-08-02 (5V power rail rebuilt — brownout blocker cleared).
 
-## Current status (2026-07-04): FIRST FLIGHT
+## Current status (2026-08-02): 5V RAIL FIXED; BR+TL channels dead (open)
+
+### 5V rail rebuild (done, verified)
+
+- **Buck replaced**: the undersized 15V→5V buck is gone. New power chain:
+  - Battery XT60 → factory low-ESR electrolytic cap module (kept, on VBAT)
+    + 4-in-1 ESC.
+  - ESC harness "V" (red, ~15V VBAT) + GND (black) → **Mini560 buck module,
+    5V fixed-output version** → ESP32 **5V0 pin**.
+  - **2200µF 10V electrolytic across the Mini560 5V output** (+ on 5V,
+    white-stripe leg on GND) to absorb BLE-TX/flash-write current peaks.
+  - All buck splices are **soldered** (no Dupont anywhere between the ESC
+    harness and the buck output; the old inline module used crimped joints).
+- **Verified on battery only (USB unplugged)**: no LED crackle at plug-in,
+  ESC boot melody plays, `reset=1` stays clean across an 11+ min session,
+  BLE rock-solid, and the ESP32 survives the USB unplug without rebooting.
+- The old buck's failure mode had been masking as a protocol bug: an ESC
+  browning out during its own boot never completes protocol detection.
+  If detection ever regresses, suspect power first (`reset=` in 0xB1 info).
+- Battery-only OTA (the old buck's guaranteed-brownout crash test): not yet
+  re-run — do it to formally close the brownout issue.
+
+### Open: BR + TL motors don't respond (found same afternoon)
+
+- IMU-measured probes at throttle 500: **TR and BL spin; BR and TL are
+  flat** (noise-level deltas). Group `spin` confirms: only the TR+BL
+  diagonal turns, net yaw torque visible on gz. The silent ESCs do their
+  periodic "no signal" beeps.
+- Two candidate causes, in test order:
+  1. **ESC protocol detection never happened on those channels**: the
+     battery has been plugged since morning, and at plug-in the DShot lines
+     were actually silent (esc_tool one-shot commands cut output on BLE
+     disconnect — the `output 1` run had already disconnected). Fix/test:
+     hold a BLE connection with output armed (e.g. `spin 0 30`) while
+     power-cycling the battery, then re-probe motors 1 and 2.
+  2. **Signal wiring**: the brown (BR → GPIO 13) and orange (TL → GPIO 18)
+     Dupont jumpers at the harness hub were disturbed during the buck
+     soldering. Inspect/re-seat if the power-cycle test doesn't revive them.
+- Note: firmware/BLE path was audited during diagnosis — per-motor values
+  are correct end-to-end (`run_direction_probe` writes only its motor's
+  channel; each motor has its own RMT channel and GPIO).
+
+### Still TODO from the 07-04 list
+
+- Attitude bias tuning; battery voltage sensing mod; TR motor mechanical
+  check (stalls/desyncs above ~650 solo).
+
+## Previous status (2026-07-04): FIRST FLIGHT
 
 - **The drone flew**: ~6s of stabilized hover at collective 780 (~38%),
   ground-effect altitude, commanded landing, no aborts. Yaw damped to
@@ -50,7 +97,7 @@ Last updated: 2026-07-03 (bench findings from BLE motor/ESC test sessions).
 | ESC | UAngel 4-in-1, 45A (60A burst), BLHeli_S, 3-6S | supports DShot150/300; direction configurable via DShot commands |
 | Status LED | WS2812 (onboard, GPIO 48) | driven by `led_strip` RMT backend |
 | Battery | ~15V on ESC "V" wire → likely 4S LiPo | exact pack spec TODO; no voltage sensing wired (see Battery section) |
-| Power | ESC "V" (15V) → buck converter → 5V → ESP32 5V0 | do NOT feed 15V to the ESP32 directly |
+| Power | ESC "V" (15V) → Mini560 buck (5V) + 2200µF cap → ESP32 5V0 | replaced 2026-08-02; do NOT feed 15V to the ESP32 directly |
 
 ## ESC harness ↔ ESP32 wiring
 
@@ -143,7 +190,9 @@ that mode — the firmware skips the LED task there (`ESP_ERROR_CHECK` inside
   from firmware — motors can only move on explicit BLE commands. ESC startup/
   arming beeps still twitch the props at battery-on; that is the ESC itself,
   not throttle.
-- **Brownout under load (confirmed, NOT battery charge)**: even on a full pack
+- **Brownout under load — FIXED 2026-08-02** (Mini560 5V + 2200µF on the 5V
+  rail; battery-only OTA still to be re-verified). Original findings kept for
+  reference: even on a full pack
   (>4.0V/cell), BLE TX + flash writes (OTA) trip the ESP32 brownout reset
   (`reset=9` in info telemetry). Every USB-powered flash succeeded; battery-only
   OTAs mostly brown out, and pacing the transfer doesn't help → the 15V→5V
