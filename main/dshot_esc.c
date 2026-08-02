@@ -61,7 +61,10 @@ typedef struct
 
 static bool dshot_active = false;
 static rmt_channel_handle_t dshot_channels[DSHOT_MOTOR_COUNT] = {0};
-static rmt_encoder_handle_t dshot_copy_encoder = NULL;
+// One copy encoder per channel: RMT encoders keep per-transaction internal
+// state and must not be shared across concurrently-transmitting channels
+// (sharing corrupts frames when bursts overlap, i.e. constantly at 100Hz).
+static rmt_encoder_handle_t dshot_copy_encoders[DSHOT_MOTOR_COUNT] = {0};
 static SemaphoreHandle_t dshot_write_mutex = NULL;
 static QueueHandle_t dshot_dir_queue = NULL;
 static uint16_t dshot_current_values[DSHOT_MOTOR_COUNT] = {0};
@@ -108,7 +111,7 @@ static void dshot_refresh_task(void *pvParameters)
                                     dshot_telem_flags[m], frame_banks[m][bank]);
                 rmt_transmit_config_t tx_config = {
                     .loop_count = DSHOT_BURST_FRAMES};
-                if (rmt_transmit(dshot_channels[m], dshot_copy_encoder,
+                if (rmt_transmit(dshot_channels[m], dshot_copy_encoders[m],
                                  frame_banks[m][bank],
                                  sizeof(frame_banks[m][bank]),
                                  &tx_config) == ESP_OK)
@@ -391,16 +394,17 @@ esp_err_t dshot_config_start(void)
         return ESP_ERR_NO_MEM;
     }
 
-    rmt_copy_encoder_config_t encoder_config = {};
-    esp_err_t ret = rmt_new_copy_encoder(&encoder_config, &dshot_copy_encoder);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "copy encoder init failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
     for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
     {
+        rmt_copy_encoder_config_t encoder_config = {};
+        esp_err_t ret = rmt_new_copy_encoder(&encoder_config,
+                                             &dshot_copy_encoders[motor]);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "copy encoder %d init failed: %s", motor,
+                     esp_err_to_name(ret));
+            return ret;
+        }
         rmt_tx_channel_config_t channel_config = {
             .gpio_num = MOTOR_PINS[motor],
             .clk_src = RMT_CLK_SRC_DEFAULT,
