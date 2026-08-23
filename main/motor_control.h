@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
@@ -38,6 +39,9 @@ void esc_control_task(void *pvParameters);
 
 // New: power adjust entry points used by BLE opcodes
 void motor_adjust_power(int16_t delta_step_0_to_1000);
+// Pulse a single motor in PWM mode (others forced to 0). speed 0 clears.
+// Capped at a bench-safe value; does not use the collective mix.
+esp_err_t motor_set_solo(uint8_t motor, uint16_t speed);
 // Refresh the inactivity failsafe deadline (call on any received BLE command).
 void motor_command_keepalive(void);
 // Milliseconds since the last received BLE command.
@@ -46,7 +50,6 @@ void motor_get_debug_status(char *buffer, size_t buffer_len);
 
 // Per-motor thrust trim (percent, 50-150, 100 = neutral), NVS-persisted.
 // In motor_set_trims, 0 or 0xFF entries leave that motor unchanged.
-#include "esp_err.h"
 void motor_load_trims(void);
 esp_err_t motor_set_trims(const uint8_t trims_pct[4]);
 void motor_get_trims(uint8_t trims_pct[4]);

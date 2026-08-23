@@ -13,18 +13,16 @@ typedef struct
     float yaw;   // + means motor increase tends to yaw clockwise (looking down)
 } MotorInfluence;
 
-// Default placeholder mapping for an X-quad; tune with mapping test logs.
-// Order must match motor_id_t order: TR, BR, TL, BL.
-// Yaw column from measured spin directions (2026-07-03 ESC config):
-// TR+BL spin CCW, TL+BR spin CW (viewed from above). A CCW motor's drag
-// reaction torques the frame CW looking down => positive yaw influence.
+// Order must match motor_id_t: TR, BR, TL, BL.
+// Spins viewed from above (2026-08-23, XT60 = nose, A at top-right clockwise):
+// TR=A CW, BR=B CCW (phase-wire swap), TL=D CCW, BL=C CW.
+// A CCW motor's drag reaction torques the frame CW looking down => +yaw.
 static const MotorInfluence DEFAULT_MOTOR_INFLUENCE[4] = {
-    //  TR         BR         TL         BL
     // roll, pitch, yaw
-    {+1.0f, -1.0f, +1.0f}, // Top Right (CCW)
-    {+1.0f, +1.0f, -1.0f}, // Bottom Right (CW)
-    {-1.0f, -1.0f, -1.0f}, // Top Left (CW)
-    {-1.0f, +1.0f, +1.0f}, // Bottom Left (CCW)
+    {+1.0f, -1.0f, -1.0f}, // Top Right A (CW)
+    {+1.0f, +1.0f, +1.0f}, // Bottom Right B (CCW)
+    {-1.0f, -1.0f, +1.0f}, // Top Left D (CCW)
+    {-1.0f, +1.0f, -1.0f}, // Bottom Left C (CW)
 };
 
 #endif // MOTOR_MAPPING_H

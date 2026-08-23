@@ -41,7 +41,8 @@ typedef enum
     // ESC configuration (DShot). MOTOR_MODE persists to NVS and reboots;
     // the other two only work when booted in DShot config mode.
     PENDRAGON_BLE_CMD_MOTOR_MODE = 0xD0,        // [mode: 0=pwm, 1=dshot-config]
-    PENDRAGON_BLE_CMD_ESC_DIRECTION = 0xD1,      // [motor mask, 0=normal 1=reversed]
+    PENDRAGON_BLE_CMD_ESC_DIRECTION = 0xD1,      // [mask, 0=normal 1=reversed, flags?]
+    // flags: bit0 keep-all DShot-0, bit1 skip save, bit2 use cmd 20/21
     PENDRAGON_BLE_CMD_ESC_TEST_THROTTLE = 0xD2,  // [lo, hi] raw dshot 0|48..2047
     // Pulse one motor and integrate gyro Z reaction torque to detect its true
     // spin direction (chip +Z is down: CCW seen from above => positive gz).
@@ -51,7 +52,8 @@ typedef enum
     PENDRAGON_BLE_CMD_MOTOR_TRIM = 0xD4, // [tr, br, tl, bl]
     // Send a raw DShot command (1-47, e.g. 1-5 = beacon beeps) to one motor.
     PENDRAGON_BLE_CMD_ESC_RAW_CMD = 0xD5,      // [motor, cmd]
-    // Set one motor's raw DShot throttle (0 stop, 48..cap). DShot mode only.
+    // Set one motor's throttle (others stay 0). DShot: raw 0|48..cap.
+    // PWM: 0-1000 bench-capped solo pulse. [motor, lo, hi]
     PENDRAGON_BLE_CMD_ESC_MOTOR_THROTTLE = 0xD6, // [motor, lo, hi]
     // Enable/disable DShot signal output. Boot default is OFF (lines silent,
     // ESC disarmed); output is cut on BLE disconnect. Motor commands require

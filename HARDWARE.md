@@ -1,9 +1,40 @@
 # Pendragon — Hardware & Wiring Reference
 
 Living document for the physical build. Keep this in sync when wiring changes.
-Last updated: 2026-08-02 (5V power rail rebuilt — brownout blocker cleared).
+Last updated: 2026-08-23 (motor map + spin directions confirmed).
 
-## Current status (2026-08-02): 5V RAIL FIXED; BR+TL channels dead (open)
+## Current status (2026-08-23): four corners mapped; X-quad spins set
+
+Viewed from above, XT60 end = nose, lettering A at top-right then clockwise.
+
+| Letter | Corner | Firmware | GPIO | Signal | Spin (from above) | How |
+|---|---|---|---|---|---|---|
+| A | Top right (front-right) | 0 TR | 5 | White | CW | ESC as-is |
+| B | Bottom right (rear-right) | 1 BR | 13 | Brown | CCW | Two motor phase wires swapped (left↔right, middle kept) |
+| C | Bottom left (rear-left) | 3 BL | 17 | Yellow | CW | ESC as-is |
+| D | Top left (front-left) | 2 TL | 18 | Orange | CCW | ESC as-is |
+
+Diagonals: A+C CW, B+D CCW. That is the target X-quad. Isolated DShot pulses (raw 400, unused lines silent) confirmed each corner; IMU moved; other `m[]` channels stayed 0.
+
+### What was wrong, and what we do not trust
+
+- **Software DShot reverse does not flip this UAngel BLHeli_S 4-in-1.** Isolated cmd 8, isolated cmd 7, and all-four DShot-0 + cmd 8 all left B clockwise. Reverse a stubborn channel by swapping any two of its three **motor phase wires**, not the signal jumper.
+- **`0xD1` used to keep-alive all four with DShot-0.** Unused DShot-0 is mis-read as analog/oneshot on this ESC and neighbouring props creep. Firmware now drives only motors in the mask (optional `flags` bit0 restores the all-four zeros programming window).
+- **DShot-0 on unused lines after prime** caused the same analog creep. Target-only output: a motor is silent until commanded; a newly live line gets 2s of DShot-0 (`DSHOT_REARM_MS`) before throttle ≥ 48.
+- **Brown GPIO 13 (B) was cut** inside the Dupont; silence with `m=[0,400,0,0]` and a dead IMU was the open signal wire, not a bricked ESC save. White G5 and yellow G17 also needed reseats earlier in the same session.
+- **Do not use `0xD2` (all-motor test throttle) on the bench with props on.** That was the wall incident. Identify motors with `0xD6` one-at-a-time, abort if any other `m=` goes live, output off after each pulse. Cap 700.
+
+### Mixer / props (required before any hover)
+
+- `flight_ctrl.c` `YAW_MIX` and `motor_mapping.h` now match A+C CW, B+D CCW. **OTA that firmware before arming flight** — the board still has the old mixer until flashed.
+- Each prop must match its motor: CW prop on A and C, CCW prop on B and D, all thrusting **up**. B spun CW until the phase swap; if its prop was a CW blade it will now push down until replaced/flipped to a CCW prop.
+- July 2026 ESC/prop notes (TR+BL CCW, TL+BR CW) are **superseded**.
+
+### Not flight-ready yet
+
+Frame was taped to a support for bench work. Trims `[71,71,92,122]` are from the old spin/prop map. Attitude bias from the 2026-07-04 hover is still open. No battery-voltage ADC. Confirm props, OTA mixer, untape, battery in reach, then a low collective hover — not an unattended fly.
+
+## Previous status (2026-08-02): 5V RAIL FIXED; BR+TL channels dead (open)
 
 ### 5V rail rebuild (done, verified)
 
@@ -148,6 +179,7 @@ Last updated: 2026-08-02 (5V power rail rebuilt — brownout blocker cleared).
 | C | — | Not connected (likely current-sense output — worth wiring to an ADC pin for coulomb counting) | — |
 
 Motor order in firmware (`motor_id_t`): TR=0, BR=1, TL=2, BL=3.
+Owner lettering (XT60 = nose, A at top-right clockwise): A=TR, B=BR, C=BL, D=TL.
 
 ## IMU (ICM-42688-P) wiring — SPI2/FSPI
 
@@ -193,23 +225,23 @@ that mode — the firmware skips the LED task there (`ESP_ERROR_CHECK` inside
 `led_strip` would otherwise abort → boot loop; this happened, fixed 2026-07-03).
 **A dark status LED = DShot config mode.**
 
-## Bench findings (2026-07-03)
+## Bench findings (2026-08-23 supersedes 2026-07-03 spin/prop map)
 
-- **ESC direction mapping (measured, all four channels): `normal` = CW,
-  `reversed` = CCW** (viewed from above). Set via BLHeli_S DShot commands
-  (`0xD1` spin-direction + save; persists in the ESC across power cycles).
-- **Current ESC configuration** (standard quad-X): TR + BL `reversed` (CCW),
-  TL + BR `normal` (CW).
-- **Prop map (CONFIRMED via all-motor yaw-torque test)**: TR = CCW,
-  BR = CCW, TL = CW, BL = CW — a proper 2+2 set, but mounted SIDE-WISE
-  (CCW pair on the right, CW pair on the left). Validation: spinning every
-  prop in its thrust direction gave ~+1.5dps net yaw drift (torques cancel),
-  while all-CW gave +9.5dps yaw plus a 22dps roll onset (right side thrusting
-  down) at only 21% throttle.
-- **One swap needed for flight**: exchange the BOTTOM RIGHT and BOTTOM LEFT
-  props → diagonals match (TR+BL CCW, TL+BR CW). After the swap set ESCs:
-  TR=reversed, BL=reversed (CCW); TL=normal, BR=normal (CW). Currently (props
-  side-wise) ESCs are on thrust-up settings TR+BR=reversed, TL+BL=normal.
+- **Confirmed X-quad spins (from above, XT60 = nose):** A/TR CW, B/BR CCW,
+  C/BL CW, D/TL CCW. B was reversed by swapping two motor phase wires after
+  DShot cmd 7/8/21 (isolated and all-four-live) failed to change it.
+- **ESC `normal`/`reversed` DShot commands** on this 4-in-1 are not a reliable
+  per-motor reverse. Do not depend on `0xD1`/`0xD5` save to flip a channel.
+- **Keep unused DShot lines silent.** DShot-0 on idle channels analog-creeps
+  neighbours. Isolated `0xD6` + 2s re-arm is the bench identification path.
+- **DShot test throttle** is firmware-capped at raw 700. Identification pulses
+  used 400.
+
+### Historical (2026-07-03) — spin/prop map no longer current
+
+- ESC `normal` = CW, `reversed` = CCW was measured on all four channels then.
+- Then-current layout (TR+BL CCW, TL+BR CW, later a BR↔BL prop swap) is
+  superseded by the 2026-08-23 table at the top of this file.
 - **Measurement lesson**: single-motor tilt-magnitude probes are
   stance-dependent and unreliable across sessions (they flip-flopped on
   BR/BL/TR); the all-motor yaw-balance comparison at fixed throttle is the
@@ -241,8 +273,8 @@ that mode — the firmware skips the LED task there (`ESP_ERROR_CHECK` inside
   (of 1000) to start; once spinning they sustain down to ~310. At ≤280 they do
   not start at all. (The `WORKING_THROTTLE_VALUE 200` comment in
   `motor_control.c` is optimistic.)
-- **DShot test throttle** is firmware-capped at raw 500/2047 (~23%) for bench
-  safety; direction checks are done around raw 200 (~8%).
+- **DShot test throttle** is firmware-capped at raw 700/2047 for bench
+  safety; identification pulses use 400.
 - **BLE OTA:** works end-to-end (~605KB in ~3min, 509-byte chunks with
   write-with-response, ~3.4 KB/s). Version/partition verifiable via `0xB1` info.
 - **BLE disconnect failsafe:** collective → 0 (PWM mode) / throttle → 0 (DShot
@@ -263,7 +295,7 @@ Service `ffeeddcc-bbaa-9988-7766-554433221100`, command char (write)
 | `0xB3` | — | motor driver status (per-mode) |
 | `0xC0..0xC3` | see code | OTA begin/data/end/abort |
 | `0xD0` | `[0\|1]` | motor mode pwm/dshot-config → NVS + reboot |
-| `0xD1` | `[mask, 0\|1]` | ESC spin direction normal/reversed + save (DShot mode) |
+| `0xD1` | `[mask, 0\|1, flags?]` | ESC spin direction (isolated to mask). flags: bit0=keep-all DShot-0, bit1=skip save, bit2=cmd 20/21. Unreliable reverse on this 4-in-1. |
 | `0xD2` | `[lo, hi]` | raw DShot test throttle 0 / 48-2047 (DShot mode) |
 | `0xD3` | `[motor, lo, hi]` | direction probe: pulse motor, report gz/accel deltas |
 | `0xD4` | `[tr, br, tl, bl]` | per-motor thrust trim % (50-150, 0/0xFF keep; empty = report) |
@@ -299,20 +331,12 @@ Planned mod (small):
 
 ## Flight status / next steps
 
-- [x] ESC direction mapping measured; channels set to quad-X (TR+BL CCW, TL+BR CW)
-- [ ] Inspect TOP RIGHT corner (weak/erratic thrust response — check prop nut,
-      blade, mount) and identify its prop type (compare helix against BR's).
-      Owner reports one motor is indeed weaker (possibly damaged) — per-motor
-      thrust trim (opcode 0xD4, NVS-persisted, applied in the PWM flight mix)
-      exists to compensate; calibrate it from thrust-probe data once props
-      are finalized.
-- [ ] Rearrange props to match ESC config (likely: swap BR and BL props)
-- [ ] Re-run per-motor thrust probe after prop work: every motor should show
-      a strong tilt (~30-40mg) at its configured direction
-- [ ] Switch `motor_mode` back to PWM (0xD0) + battery cycle for flight mode
-      (or better: adopt DShot as the flight protocol — faster, digital, no
-      calibration; needs the DShot driver promoted out of config-only mode)
+- [x] Four isolated corners mapped (A=TR, B=BR, C=BL, D=TL)
+- [x] Spins set for X-quad: A+C CW, B+D CCW (B via phase-wire swap)
+- [x] Yaw mixer updated in source to match those spins (needs OTA)
+- [ ] Verify each prop matches its motor (CW prop on A,C; CCW on B,D; thrust up)
+- [ ] OTA mixer firmware; untape from the bench support
+- [ ] Recalibrate trims on the final props (old `[71,71,92,122]` is stale)
+- [ ] Low collective hover with battery in reach — not an unattended flight
 - [ ] Battery voltage sensing mod (see above)
-- [ ] Stabilization: attitude estimation (gyro+accel fusion) + angle/rate PID +
-      motor mixing — goal: stable hover just above ground. NOT flight-ready yet;
-      current `esc_control_task` only has a crude accel-only P correction.
+- [ ] Attitude bias from the 2026-07-04 hover still open

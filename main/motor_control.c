@@ -72,6 +72,11 @@ static uint16_t current_motor_speeds[MOTOR_COUNT] = {0, 0, 0, 0}; // Current spe
 static uint8_t motor_trim_pct[MOTOR_COUNT] = {100, 100, 100, 100};
 static bool stabilization_enabled = true;
 static uint16_t commanded_collective = 0; // 0..1000 collective power target
+// Solo bench pulse: one motor, no mix. -1 = off. Used to label motors
+// without the POWER_UP collective (which drives all four).
+static int8_t solo_motor_id = -1;
+static uint16_t solo_speed = 0;
+#define MOTOR_SOLO_MAX 450
 // Inactivity failsafe (2026-08-02 incident: MCU/BLE stack died mid-test with
 // collective held at 340; the disconnect handler never ran and the LEDC kept
 // driving the motors). The control loop cuts power on its own if no command
@@ -369,9 +374,11 @@ void esc_control_task(void *pvParameters)
         bool imu_ok = false;
         portENTER_CRITICAL(&motor_state_mux);
         uint16_t collective_snapshot = commanded_collective;
+        int8_t solo_id_snapshot = solo_motor_id;
+        uint16_t solo_speed_snapshot = solo_speed;
         TickType_t last_cmd_snapshot = last_command_tick;
         portEXIT_CRITICAL(&motor_state_mux);
-        bool active = (collective_snapshot > 0);
+        bool active = (collective_snapshot > 0) || (solo_id_snapshot >= 0);
 
         // Inactivity failsafe: motors only stay powered while commands keep
         // arriving. Catches every failure the BLE disconnect callback can
@@ -381,11 +388,15 @@ void esc_control_task(void *pvParameters)
         {
             portENTER_CRITICAL(&motor_state_mux);
             commanded_collective = 0;
+            solo_motor_id = -1;
+            solo_speed = 0;
             portEXIT_CRITICAL(&motor_state_mux);
             collective_snapshot = 0;
+            solo_id_snapshot = -1;
+            solo_speed_snapshot = 0;
             active = false;
             system_armed = false;
-            evlog("FAILSAFE: no command for %dms at collective>0, motors cut",
+            evlog("FAILSAFE: no command for %dms, motors cut",
                   COMMAND_FAILSAFE_TIMEOUT_MS);
         }
         if (stabilization_enabled && active)
@@ -396,7 +407,18 @@ void esc_control_task(void *pvParameters)
             }
         }
 
-        // Build per-motor target from collective, thrust trim, stabilization
+        // Build per-motor target from collective, thrust trim, stabilization.
+        // Solo mode is exclusive: only that motor, no mix, no other channels.
+        if (solo_id_snapshot >= 0 && solo_id_snapshot < MOTOR_COUNT)
+        {
+            for (int i = 0; i < MOTOR_COUNT; i++)
+            {
+                target_throttles[i] = (i == solo_id_snapshot) ? solo_speed_snapshot : 0;
+            }
+            imu_ok = false;
+        }
+        else
+        {
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
             uint32_t trimmed = ((uint32_t)collective_snapshot * motor_trim_pct[i]) / 100;
@@ -423,6 +445,7 @@ void esc_control_task(void *pvParameters)
                 int32_t tgt = (int32_t)target_throttles[m] + (int32_t)corr;
                 target_throttles[m] = (uint16_t)MIN(MAX(tgt, 0), 1000);
             }
+        }
         }
 
         // Ramp current speeds toward targets
@@ -531,6 +554,56 @@ void motor_get_speeds(uint16_t speeds[4])
 }
 
 // ===== New public entry points used by BLE opcodes =====
+esp_err_t motor_set_solo(uint8_t motor, uint16_t speed)
+{
+    if (motor >= MOTOR_COUNT)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (speed > MOTOR_SOLO_MAX)
+    {
+        speed = MOTOR_SOLO_MAX;
+    }
+
+    portENTER_CRITICAL(&motor_state_mux);
+    last_command_tick = xTaskGetTickCount();
+    if (speed == 0)
+    {
+        if (solo_motor_id == (int8_t)motor)
+        {
+            solo_motor_id = -1;
+            solo_speed = 0;
+        }
+        current_motor_speeds[motor] = 0;
+        portEXIT_CRITICAL(&motor_state_mux);
+        set_motor_speed(motor, 0);
+        evlog("solo motor=%u stop", motor);
+        return ESP_OK;
+    }
+
+    commanded_collective = 0;
+    solo_motor_id = (int8_t)motor;
+    solo_speed = speed;
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        if (i != motor)
+        {
+            current_motor_speeds[i] = 0;
+        }
+    }
+    portEXIT_CRITICAL(&motor_state_mux);
+
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        if (i != motor)
+        {
+            set_motor_speed(i, 0);
+        }
+    }
+    evlog("solo motor=%u speed=%u", motor, speed);
+    return ESP_OK;
+}
+
 void motor_command_keepalive(void)
 {
     portENTER_CRITICAL(&motor_state_mux);
@@ -561,6 +634,8 @@ void motor_adjust_power(int16_t delta_step_0_to_1000)
     hard_stop = delta_step_0_to_1000 < 0 && updated == 0;
     if (hard_stop)
     {
+        solo_motor_id = -1;
+        solo_speed = 0;
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
             current_motor_speeds[i] = 0;
@@ -589,9 +664,17 @@ void motor_get_debug_status(char *buffer, size_t buffer_len)
     collective_snapshot = commanded_collective;
     portEXIT_CRITICAL(&motor_state_mux);
 
+    int8_t solo_id;
+    uint16_t solo_spd;
+    portENTER_CRITICAL(&motor_state_mux);
+    solo_id = solo_motor_id;
+    solo_spd = solo_speed;
+    portEXIT_CRITICAL(&motor_state_mux);
+
     snprintf(buffer, buffer_len,
-             "motor collective=%u trim=[%u,%u,%u,%u] timer=%s ch=[%s,%s,%s,%s] duty=[%s,%s,%s,%s] upd=[%s,%s,%s,%s]",
+             "motor collective=%u solo=%d/%u trim=[%u,%u,%u,%u] timer=%s ch=[%s,%s,%s,%s] duty=[%s,%s,%s,%s] upd=[%s,%s,%s,%s]",
              collective_snapshot,
+             (int)solo_id, solo_spd,
              motor_trim_pct[0], motor_trim_pct[1], motor_trim_pct[2], motor_trim_pct[3],
              esp_err_to_name(motor_timer_config_status),
              esp_err_to_name(motor_channel_config_status[0]),

@@ -13,8 +13,10 @@ The primary goal of this firmware is to enable flight control and telemetry via 
 *   **Motors & ESCs:** UAngel 4-in-1 45A BLHeli_S (3-6S)
 *   **Frame & Power:** ~4S LiPo → ESC "V" 15V → Mini560 buck (5V) + 2200µF → ESP32 5V0
 
-See [HARDWARE.md](HARDWARE.md) for the full wiring map, protocols, bench
-findings, and battery-monitoring plan.
+See [HARDWARE.md](HARDWARE.md) for the wiring map, confirmed motor lettering
+(A=TR CW, B=BR CCW, C=BL CW, D=TL CCW with XT60 as nose), protocols, and
+bench findings. B was reversed by swapping two phase wires; DShot reverse
+on this 4-in-1 is not reliable.
 
 ## Bluetooth LE (BLE) Interface
 

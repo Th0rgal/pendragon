@@ -31,6 +31,9 @@ extern const uint8_t MOTOR_PINS[];
 #define DSHOT_CMD_SPIN_DIRECTION_1 7
 #define DSHOT_CMD_SPIN_DIRECTION_2 8
 #define DSHOT_CMD_SAVE_SETTINGS 12
+// BLHeli_32 / later BLHeli_S aliases (no-op on ESCs that ignore them).
+#define DSHOT_CMD_SPIN_DIRECTION_NORMAL 20
+#define DSHOT_CMD_SPIN_DIRECTION_REVERSED 21
 
 #define DSHOT_MAX_TEST_THROTTLE 700 // raw 48..2047; ~34% cap for bench safety
 
@@ -49,6 +52,7 @@ typedef struct
     dshot_request_type_t type;
     uint8_t mask;      // DSHOT_REQ_DIRECTION: motors to change
     bool reversed;     // DSHOT_REQ_DIRECTION
+    uint8_t flags;     // DSHOT_REQ_DIRECTION: DSHOT_DIR_*
     uint8_t motor;     // DSHOT_REQ_PROBE / RAW_CMD: single motor index
     uint16_t throttle; // DSHOT_REQ_PROBE: raw dshot value; RAW_CMD: command
 } dshot_dir_request_t;
@@ -76,6 +80,11 @@ static bool dshot_output_on = false;
 // requires ~300ms of zero throttle to arm. Emit only DShot0 for this window;
 // throttle values are stored and take effect when the prime expires.
 #define DSHOT_PRIME_MS 2000
+// After rmt_disable the ESC has disarmed and ignores a first frame that is
+// already a throttle value. Emit DShot-0 this long on a newly live line
+// before applying throttle >= 48. Commands 1-47 skip this (they are the
+// arm/direction protocol and must go out as-is).
+#define DSHOT_REARM_MS 2000
 static volatile TickType_t dshot_enable_tick = 0;
 
 static bool dshot_in_prime(void)
@@ -95,6 +104,15 @@ static void build_frame_symbols(uint16_t value, bool telemetry,
 static rmt_symbol_word_t frame_banks[DSHOT_MOTOR_COUNT][2][DSHOT_FRAME_SYMBOLS];
 static int frame_bank_idx[DSHOT_MOTOR_COUNT] = {0};
 static volatile int bursts_in_flight[DSHOT_MOTOR_COUNT] = {0};
+// After the zero-throttle prime, DShot-0 on unused channels is mis-read
+// as analog/oneshot (camera: several props disc at once on keep-alive).
+// Silence unused lines (ESC disarms on signal loss). The motor that is
+// about to get throttle is re-armed with DShot-0 first.
+static bool dshot_channel_live[DSHOT_MOTOR_COUNT] = {false, false, false, false};
+static bool dshot_rearming[DSHOT_MOTOR_COUNT] = {false, false, false, false};
+static TickType_t dshot_rearm_start[DSHOT_MOTOR_COUNT] = {0};
+static bool dshot_tx_fail_logged[DSHOT_MOTOR_COUNT] = {false, false, false, false};
+static bool dshot_en_fail_logged[DSHOT_MOTOR_COUNT] = {false, false, false, false};
 
 static bool IRAM_ATTR on_burst_done(rmt_channel_handle_t chan,
                                     const rmt_tx_done_event_data_t *edata,
@@ -112,29 +130,120 @@ static void dshot_refresh_task(void *pvParameters)
         if (dshot_output_on)
         {
             bool prime = dshot_in_prime();
+            char tx_fail_ble[4][80];
+            int tx_fail_n = 0;
             xSemaphoreTake(dshot_write_mutex, portMAX_DELAY);
             for (int m = 0; m < DSHOT_MOTOR_COUNT; m++)
             {
+                uint16_t value = dshot_current_values[m];
+                bool telem = dshot_telem_flags[m];
+                // Do not broadcast DShot-0 on unused lines, even during
+                // the global prime: the 4-in-1 treats that as analog and
+                // neighbouring props creep. Only a motor that has a
+                // command (throttle or special cmd) is driven; if that
+                // happens inside the prime window it still gets zeros.
+                bool want_signal = (value != 0) || telem;
+                if (prime && want_signal)
+                {
+                    value = 0;
+                    telem = false;
+                }
+                bool silence = !want_signal;
+                if (silence)
+                {
+                    dshot_rearming[m] = false;
+                    if (bursts_in_flight[m] >= 1)
+                    {
+                        continue;
+                    }
+                    if (dshot_channel_live[m])
+                    {
+                        rmt_disable(dshot_channels[m]);
+                        dshot_channel_live[m] = false;
+                        bursts_in_flight[m] = 0;
+                    }
+                    continue;
+                }
+                if (!dshot_channel_live[m])
+                {
+                    esp_err_t en = rmt_enable(dshot_channels[m]);
+                    // INVALID_STATE = already enabled; still usable.
+                    if (en != ESP_OK && en != ESP_ERR_INVALID_STATE)
+                    {
+                        ESP_LOGE(TAG, "rmt_enable motor %d GPIO%d: %s",
+                                 m, MOTOR_PINS[m], esp_err_to_name(en));
+                        if (!dshot_en_fail_logged[m] && tx_fail_n < 4)
+                        {
+                            dshot_en_fail_logged[m] = true;
+                            snprintf(tx_fail_ble[tx_fail_n],
+                                     sizeof(tx_fail_ble[tx_fail_n]),
+                                     "rmt_enable motor=%d gpio=%d %s",
+                                     m, MOTOR_PINS[m], esp_err_to_name(en));
+                            tx_fail_n++;
+                        }
+                        continue;
+                    }
+                    dshot_channel_live[m] = true;
+                    bursts_in_flight[m] = 0;
+                    // If a channel was actually off, the ESC disarmed on
+                    // signal loss and will ignore a first nonzero throttle.
+                    if (value >= 48)
+                    {
+                        dshot_rearming[m] = true;
+                        dshot_rearm_start[m] = xTaskGetTickCount();
+                    }
+                }
+                if (dshot_rearming[m])
+                {
+                    if ((xTaskGetTickCount() - dshot_rearm_start[m]) <
+                        pdMS_TO_TICKS(DSHOT_REARM_MS))
+                    {
+                        value = 0;
+                        telem = false;
+                    }
+                    else
+                    {
+                        dshot_rearming[m] = false;
+                    }
+                }
                 if (bursts_in_flight[m] >= 1)
                 {
                     continue; // previous burst still playing (queue depth 1)
                 }
                 int bank = frame_bank_idx[m] ^ 1;
-                build_frame_symbols(prime ? 0 : dshot_current_values[m],
-                                    prime ? false : dshot_telem_flags[m],
-                                    frame_banks[m][bank]);
+                build_frame_symbols(value, telem, frame_banks[m][bank]);
                 rmt_transmit_config_t tx_config = {
                     .loop_count = DSHOT_BURST_FRAMES};
-                if (rmt_transmit(dshot_channels[m], dshot_copy_encoders[m],
-                                 frame_banks[m][bank],
-                                 sizeof(frame_banks[m][bank]),
-                                 &tx_config) == ESP_OK)
+                esp_err_t tx = rmt_transmit(dshot_channels[m],
+                                            dshot_copy_encoders[m],
+                                            frame_banks[m][bank],
+                                            sizeof(frame_banks[m][bank]),
+                                            &tx_config);
+                if (tx == ESP_OK)
                 {
                     bursts_in_flight[m]++;
                     frame_bank_idx[m] = bank;
                 }
+                else
+                {
+                    ESP_LOGE(TAG, "rmt_transmit motor %d GPIO%d: %s",
+                             m, MOTOR_PINS[m], esp_err_to_name(tx));
+                    if (!dshot_tx_fail_logged[m] && tx_fail_n < 4)
+                    {
+                        dshot_tx_fail_logged[m] = true;
+                        snprintf(tx_fail_ble[tx_fail_n],
+                                 sizeof(tx_fail_ble[tx_fail_n]),
+                                 "rmt_transmit motor=%d gpio=%d %s",
+                                 m, MOTOR_PINS[m], esp_err_to_name(tx));
+                        tx_fail_n++;
+                    }
+                }
             }
             xSemaphoreGive(dshot_write_mutex);
+            for (int i = 0; i < tx_fail_n; i++)
+            {
+                ble_log_str("DBG", tx_fail_ble[i]);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -358,9 +467,12 @@ static void dshot_worker_task(void *pvParameters)
 
         if (request.type == DSHOT_REQ_RAW_CMD)
         {
+            // BLHeli_S wants ~10 identical command frames, then a live
+            // DShot-0 so a follow-up throttle or save does not see signal-loss.
             dshot_write_motor(request.motor, request.throttle, true);
-            vTaskDelay(pdMS_TO_TICKS(150));
-            dshot_write_motor(request.motor, 0, false);
+            vTaskDelay(pdMS_TO_TICKS(800));
+            dshot_write_motor(request.motor, 0, true);
+            vTaskDelay(pdMS_TO_TICKS(400));
             char message[80];
             snprintf(message, sizeof(message), "raw cmd %u sent to motor %u",
                      request.throttle, request.motor);
@@ -375,26 +487,70 @@ static void dshot_worker_task(void *pvParameters)
                 continue;
             }
 
-            uint16_t direction_cmd = request.reversed
-                                         ? DSHOT_CMD_SPIN_DIRECTION_2
-                                         : DSHOT_CMD_SPIN_DIRECTION_1;
+            // BLHeli_S: cmd 7 = direction 1 (normal/CW), 8 = direction 2
+            // (reversed/CCW). Cmd 20/21 are BLHeli_32 aliases; some BLHeli_S
+            // builds ignore them, others only accept them.
+            uint16_t dir_cmd;
+            if (request.flags & DSHOT_DIR_CMD_20_21)
+            {
+                dir_cmd = request.reversed ? DSHOT_CMD_SPIN_DIRECTION_REVERSED
+                                           : DSHOT_CMD_SPIN_DIRECTION_NORMAL;
+            }
+            else
+            {
+                dir_cmd = request.reversed ? DSHOT_CMD_SPIN_DIRECTION_2
+                                           : DSHOT_CMD_SPIN_DIRECTION_1;
+            }
+            bool keep_all = (request.flags & DSHOT_DIR_KEEP_ALL) != 0;
+            bool do_save = (request.flags & DSHOT_DIR_NO_SAVE) == 0;
 
-            // Motor must be stopped; command and save must each be seen
-            // several consecutive times (the ~1kHz loop repeats them).
-            dshot_write_motor(motor, 0, false);
-            vTaskDelay(pdMS_TO_TICKS(300));
-            dshot_write_motor(motor, direction_cmd, true);
-            vTaskDelay(pdMS_TO_TICKS(150));
-            dshot_write_motor(motor, 0, false);
-            vTaskDelay(pdMS_TO_TICKS(60));
-            dshot_write_motor(motor, DSHOT_CMD_SAVE_SETTINGS, true);
-            vTaskDelay(pdMS_TO_TICKS(150));
-            dshot_write_motor(motor, 0, false);
-            vTaskDelay(pdMS_TO_TICKS(250));
+            // Isolated by default: unused DShot-0 analog-creeps neighbouring
+            // props on this 4-in-1. KEEP_ALL is the 4-in-1 programming
+            // window (zeros+telem only, no throttle) for ESCs that ignore
+            // special commands unless every input is a live DShot stream.
+            if (keep_all)
+            {
+                for (int m = 0; m < DSHOT_MOTOR_COUNT; m++)
+                {
+                    dshot_write_motor(m, 0, true);
+                }
+            }
+            else
+            {
+                dshot_write_motor(motor, 0, true);
+            }
+            vTaskDelay(pdMS_TO_TICKS(800));
+            dshot_write_motor(motor, dir_cmd, true);
+            vTaskDelay(pdMS_TO_TICKS(800));
+            dshot_write_motor(motor, 0, true);
+            vTaskDelay(pdMS_TO_TICKS(80));
+            if (do_save)
+            {
+                dshot_write_motor(motor, DSHOT_CMD_SAVE_SETTINGS, true);
+                vTaskDelay(pdMS_TO_TICKS(800));
+                dshot_write_motor(motor, 0, true);
+                vTaskDelay(pdMS_TO_TICKS(400));
+            }
+            if (keep_all)
+            {
+                for (int m = 0; m < DSHOT_MOTOR_COUNT; m++)
+                {
+                    if (m != motor)
+                    {
+                        dshot_write_motor(m, 0, false);
+                    }
+                }
+            }
+            // Leave the target live at DShot-0+telem so a follow-up pulse
+            // does not pay another 2s re-arm.
+            dshot_write_motor(motor, 0, true);
+            vTaskDelay(pdMS_TO_TICKS(200));
 
-            char message[80];
-            snprintf(message, sizeof(message), "esc motor=%d direction=%s saved",
-                     motor, request.reversed ? "reversed" : "normal");
+            char message[96];
+            snprintf(message, sizeof(message),
+                     "esc motor=%d direction=%s cmd=%u save=%u keep_all=%u",
+                     motor, request.reversed ? "reversed" : "normal",
+                     dir_cmd, do_save ? 1 : 0, keep_all ? 1 : 0);
             ble_log_str("DBG", message);
         }
         ble_log_str("DBG", "esc direction sequence complete");
@@ -481,14 +637,19 @@ esp_err_t dshot_output_set(bool enabled)
         {
             dshot_current_values[motor] = 0;
             dshot_telem_flags[motor] = false;
-            rmt_enable(dshot_channels[motor]); // idempotent-ish; err = already on
+            // Stay silent until a motor is actually commanded. Enabling
+            // all four here was broadcasting DShot-0 and analog-creep.
+            dshot_channel_live[motor] = false;
+            dshot_rearming[motor] = false;
+            dshot_tx_fail_logged[motor] = false;
+            dshot_en_fail_logged[motor] = false;
             bursts_in_flight[motor] = 0;
         }
         dshot_enable_tick = xTaskGetTickCount();
         dshot_output_on = true;
         xSemaphoreGive(dshot_write_mutex);
-        ESP_LOGI(TAG, "DShot output enabled (zero-throttle prime %dms)",
-                 DSHOT_PRIME_MS);
+        ESP_LOGI(TAG, "DShot output enabled (zero-throttle prime %dms, rearm %dms)",
+                 DSHOT_PRIME_MS, DSHOT_REARM_MS);
         return ESP_OK;
     }
 
@@ -498,6 +659,8 @@ esp_err_t dshot_output_set(bool enabled)
     for (int motor = 0; motor < DSHOT_MOTOR_COUNT; motor++)
     {
         rmt_disable(dshot_channels[motor]);
+        dshot_channel_live[motor] = false;
+        dshot_rearming[motor] = false;
         dshot_current_values[motor] = 0;
         bursts_in_flight[motor] = 0;
     }
@@ -511,13 +674,17 @@ bool dshot_output_enabled(void)
     return dshot_output_on;
 }
 
-esp_err_t dshot_request_direction(uint8_t mask, bool reversed)
+esp_err_t dshot_request_direction(uint8_t mask, bool reversed, uint8_t flags)
 {
     if (!dshot_active || !dshot_output_on)
     {
         return ESP_ERR_INVALID_STATE;
     }
     if (mask == 0 || (mask & ~0x0Fu) != 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (flags & ~(DSHOT_DIR_KEEP_ALL | DSHOT_DIR_NO_SAVE | DSHOT_DIR_CMD_20_21))
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -532,7 +699,10 @@ esp_err_t dshot_request_direction(uint8_t mask, bool reversed)
     }
 
     dshot_dir_request_t request = {
-        .type = DSHOT_REQ_DIRECTION, .mask = mask, .reversed = reversed};
+        .type = DSHOT_REQ_DIRECTION,
+        .mask = mask,
+        .reversed = reversed,
+        .flags = flags};
     return xQueueSend(dshot_dir_queue, &request, 0) == pdTRUE ? ESP_OK
                                                               : ESP_ERR_NO_MEM;
 }

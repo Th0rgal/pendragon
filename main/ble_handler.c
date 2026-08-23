@@ -314,11 +314,12 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
     {
         if (len < 3)
         {
-            ble_log_str("DBG", "esc direction rejected: expected [0xD1, mask, dir]");
+            ble_log_str("DBG", "esc direction rejected: expected [0xD1, mask, dir, flags?]");
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
-        evlog("cmd dir mask=%02x rev=%u", payload[1], payload[2]);
-        esp_err_t ret = dshot_request_direction(payload[1], payload[2] != 0);
+        uint8_t flags = (len >= 4) ? payload[3] : 0;
+        evlog("cmd dir mask=%02x rev=%u flags=%02x", payload[1], payload[2], flags);
+        esp_err_t ret = dshot_request_direction(payload[1], payload[2] != 0, flags);
         if (ret != ESP_OK)
         {
             char message[100];
@@ -469,7 +470,15 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
         }
         uint16_t value = read_le_u16(&payload[2]);
         evlog("cmd mthr m=%u thr=%u", payload[1], value);
-        esp_err_t ret = dshot_set_motor_throttle(payload[1], value);
+        esp_err_t ret;
+        if (dshot_mode_active())
+        {
+            ret = dshot_set_motor_throttle(payload[1], value);
+        }
+        else
+        {
+            ret = motor_set_solo(payload[1], value);
+        }
         if (ret != ESP_OK)
         {
             char message[100];
@@ -478,6 +487,10 @@ static int handle_command_payload(const uint8_t *payload, uint16_t len)
             ble_log_str("DBG", message);
             return BLE_ATT_ERR_UNLIKELY;
         }
+        char message[80];
+        snprintf(message, sizeof(message), "solo motor=%u throttle=%u",
+                 payload[1], value);
+        ble_log_str("DBG", message);
         return 0;
     }
     case PENDRAGON_BLE_CMD_ESC_TEST_THROTTLE:

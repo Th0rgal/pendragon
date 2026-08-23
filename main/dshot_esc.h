@@ -26,9 +26,13 @@ esp_err_t dshot_config_start(void);
 esp_err_t dshot_output_set(bool enabled);
 bool dshot_output_enabled(void);
 
-// Queue a spin-direction change + save for the motors in `mask` (bit per
-// motor, motor_id_t order). The worker acks over BLE telemetry when done.
-esp_err_t dshot_request_direction(uint8_t mask, bool reversed);
+// Queue a spin-direction change for the motors in `mask` (bit per motor,
+// motor_id_t order). The worker acks over BLE telemetry when done.
+// flags: DSHOT_DIR_KEEP_ALL, DSHOT_DIR_NO_SAVE, DSHOT_DIR_CMD_20_21.
+#define DSHOT_DIR_KEEP_ALL  (1u << 0)
+#define DSHOT_DIR_NO_SAVE   (1u << 1)
+#define DSHOT_DIR_CMD_20_21 (1u << 2)
+esp_err_t dshot_request_direction(uint8_t mask, bool reversed, uint8_t flags);
 
 // Drive all motors at a raw DShot throttle (0 = stop, 48..2047 = spin).
 esp_err_t dshot_set_test_throttle(uint16_t value);
@@ -43,7 +47,8 @@ esp_err_t dshot_write_flight_outputs(const uint16_t values[4]);
 // integrating gyro Z. Results are reported over BLE telemetry.
 esp_err_t dshot_request_probe(uint8_t motor, uint16_t throttle);
 
-// Queue a raw DShot command (1-47) burst to one motor (~150ms repeated).
+// Queue a raw DShot command (1-47) burst to one motor (~600ms repeated,
+// then DShot-0+telem so a follow-up throttle does not see signal-loss).
 esp_err_t dshot_request_raw_command(uint8_t motor, uint8_t command);
 
 // Current raw DShot output values, motor_id_t order.

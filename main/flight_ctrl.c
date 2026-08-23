@@ -23,8 +23,9 @@ static const float ROLL_MIX[4] = {+1.0f, +1.0f, -1.0f, -1.0f};
 // Pitch mix: positive pitch = nose up -> boost back motors (BR, BL).
 static const float PITCH_MIX[4] = {-1.0f, +1.0f, -1.0f, +1.0f};
 // Yaw mix: +gz = frame yawing CW(above); boosting the CW-spinning motors
-// (BR, TL) adds CCW reaction torque to counter it.
-static const float YAW_MIX[4] = {-1.0f, +1.0f, +1.0f, -1.0f};
+// (TR=A, BL=C) adds CCW reaction torque to counter it.
+// 2026-08-23 spins: A CW, B CCW, C CW, D CCW.
+static const float YAW_MIX[4] = {+1.0f, -1.0f, -1.0f, +1.0f};
 
 #define FLIGHT_MAX_COLLECTIVE 1200 // raw dshot (~59%) - "a bit more strength"
 #define FLIGHT_MAX_MOTOR 1400
